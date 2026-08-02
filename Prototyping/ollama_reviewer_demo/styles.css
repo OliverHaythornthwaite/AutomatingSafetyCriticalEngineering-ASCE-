@@ -1,0 +1,28 @@
+:root { color-scheme: light dark; font-family: Segoe UI, Arial, sans-serif; }
+html, body { height: 100%; }
+body { margin: 0; padding: 1rem; background: linear-gradient(135deg, #020617, #0f172a 70%, #111827); color: #e2e8f0; display: flex; flex-direction: column; overflow: hidden; }
+.app-shell { flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 0.8rem; max-width: 1540px; width: 100%; margin: 0 auto; }
+.grid { display: grid; gap: 0.8rem; grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr); flex: 1; min-height: 0; }
+.panel { background: rgba(15,23,42,0.96); border: 1px solid #334155; border-radius: 14px; padding: 0.9rem 1rem; box-shadow: 0 10px 30px rgba(2,6,23,0.35); min-height: 0; overflow: auto; }
+h1, h2, h3 { margin-top: 0; }
+h1 { margin-bottom: 0.25rem; }
+textarea, input, select, button { width: 100%; box-sizing: border-box; padding: 0.65rem 0.75rem; border-radius: 10px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; margin-top: 0.35rem; }
+textarea:focus, input:focus, select:focus { outline: 1px solid #38bdf8; border-color: #38bdf8; }
+button { cursor: pointer; background: linear-gradient(135deg, #2563eb, #3b82f6); border: none; font-weight: 600; transition: transform 0.15s ease, opacity 0.15s ease; }
+button:hover { transform: translateY(-1px); }
+button.secondary { background: linear-gradient(135deg, #475569, #64748b); }
+.row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.small { font-size: 0.92rem; color: #94a3b8; }
+.status { margin-top: 0.5rem; padding: 0.7rem; border-radius: 10px; background: #111827; white-space: pre-wrap; line-height: 1.4; }
+.model-list { max-height: 220px; overflow: auto; padding: 0.2rem 0.1rem 0; }
+.model-row { display:flex; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.45rem; padding:0.45rem 0.5rem; border-radius: 10px; background: rgba(30,41,59,0.85); }
+.pill { display: inline-block; margin: 0.2rem 0.2rem 0.2rem 0; padding: 0.32rem 0.62rem; border-radius: 999px; background: #1d4ed8; font-size: 0.8rem; font-weight: 600; }
+.pill.secondary { background: #475569; }
+.pill.offline { background: #dc2626; }
+.muted { color: #94a3b8; font-size: 0.9rem; }
+.hero { margin-bottom: 0.2rem; }
+.review-output { max-height: 210px; overflow: auto; }
+.reference-list { width: 100%; min-height: 88px; margin-top: 0.35rem; }
+.review-document-list { width: 100%; min-height: 88px; margin-top: 0.35rem; }
+label { display: block; margin-top: 0.35rem; font-size: 0.95rem; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } body { overflow: auto; } }

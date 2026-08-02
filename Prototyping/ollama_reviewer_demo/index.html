@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reviewer Portal</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="hero">
+        <h1>Reviewer Portal</h1>
+        <p class="small">Inspect local models, load review documents, and run structured safety-critical engineering reviews from a single local interface.</p>
+      </div>
+
+      <div class="grid">
+        <section class="panel">
+        <h2>1. Connect to models</h2>
+        <div class="row">
+          <button id="refreshBtn">Refresh models</button>
+          <button id="healthBtn" class="secondary">Check health</button>
+        </div>
+        <div id="healthStatus" class="status">Waiting…</div>
+        <h3>Installed models</h3>
+        <div id="models" class="model-list">Loading…</div>
+      </section>
+
+      <section class="panel">
+        <h2>2. Reviewer configuration</h2>
+        <label>Model
+          <select id="modelSelect"></select>
+        </label>
+        <label>Prompt template
+          <select id="templateSelect"></select>
+        </label>
+        <div class="row">
+          <button id="saveTemplateBtn" class="secondary">Save current prompt</button>
+          <button id="exportBtn" class="secondary">Export review</button>
+          <button id="exportTextBtn" class="secondary">Export text review</button>
+        </div>
+        <label>Review goal
+          <input id="reviewGoal" value="Review the documentation for clarity, risks, traceability, and any missing controls." />
+        </label>
+        <label>Skills prompt
+          <textarea id="skillsPrompt" rows="8">You are reviewing technical documentation for a safety-critical engineering workflow. Focus on clarity, traceability, hazard identification, assumptions, evidence, and missing control measures. Flag ambiguity and suggest specific improvements.</textarea>
+        </label>
+        <label>DO-178C / standards context
+          <textarea id="d0178cContext" rows="5" placeholder="Paste DO-178C guidance or supporting standards context here...">DO-178C review context:
+- Review for compliance with software planning, requirements, design, implementation, verification, configuration management, and quality assurance objectives.
+- Software Implementation Standard: confirm coding rules, constraints, traceability, and safety-relevant implementation controls.
+- Software Design Standard: confirm architecture, interfaces, decomposition, traceability, and design rationale.
+- Software Modelling Standard: confirm models are complete, consistent, traceable, and suitable for downstream verification.
+- Software Verification Standard: confirm review, analysis, and testing coverage, independence, and evidence quality.
+- Plan for Configuration and Control: confirm baselines, change control, approvals, and issue tracking.
+- Plans for Aspects of Certification Allocated to Software: confirm certification scope, responsibilities, evidence, and compliance strategy.</textarea>
+        </label>
+        <label>Reference document list
+          <div class="row" style="margin-top:0.25rem;">
+            <button id="addReferenceBtn" class="secondary" type="button">Add selected files</button>
+            <button id="removeReferenceBtn" class="secondary" type="button">Remove selected</button>
+            <button id="saveConfigBtn" class="secondary" type="button">Save config</button>
+          </div>
+          <select id="referenceList" class="reference-list" size="4"></select>
+          <input id="fileInput" type="file" multiple style="display:none;" />
+        </label>
+        <div id="documentStatus" class="muted">No files selected. Use the button above to add reference documentation.</div>
+        <label>Documentation to review
+          <div class="row" style="margin-top:0.25rem;">
+            <button id="reviewModeToggleBtn" class="secondary" type="button">Switch to text entry</button>
+            <button id="addReviewDocBtn" class="secondary" type="button">Add selected files</button>
+            <button id="removeReviewDocBtn" class="secondary" type="button">Remove selected</button>
+          </div>
+          <div id="reviewDocFileMode">
+            <select id="reviewDocumentList" class="review-document-list" size="4"></select>
+            <input id="reviewFileInput" type="file" multiple style="display:none;" />
+          </div>
+          <div id="reviewDocTextMode" style="display:none;">
+            <textarea id="documentText" rows="8" placeholder="Paste design notes, process documentation, or requirements here..."></textarea>
+          </div>
+          <div id="reviewDocumentStatus" class="muted">No document files selected. Use the controls above to add documentation.</div>
+        </label>
+        <button id="reviewBtn">Run review</button>
+        <div id="reviewStatus" class="status">No review yet.</div>
+      </section>
+      </div>
+
+      <section class="panel">
+        <h2>3. Review output</h2>
+        <div id="reviewOutput" class="status review-output">The review will appear here.</div>
+      </section>
+    </div>
+
+    <script>
+      const modelSelect = document.getElementById('modelSelect');
+      const modelsPane = document.getElementById('models');
+      const healthStatus = document.getElementById('healthStatus');
+      const reviewStatus = document.getElementById('reviewStatus');
+      let currentModels = [];
+      const reviewOutput = document.getElementById('reviewOutput');
+      const templateSelect = document.getElementById('templateSelect');
+      const documentStatus = document.getElementById('documentStatus');
+      const fileInput = document.getElementById('fileInput');
+      const referenceList = document.getElementById('referenceList');
+      const addReferenceBtn = document.getElementById('addReferenceBtn');
+      const removeReferenceBtn = document.getElementById('removeReferenceBtn');
+      const saveConfigBtn = document.getElementById('saveConfigBtn');
+      const reviewDocumentList = document.getElementById('reviewDocumentList');
+      const reviewDocumentStatus = document.getElementById('reviewDocumentStatus');
+      const reviewFileInput = document.getElementById('reviewFileInput');
+      const addReviewDocBtn = document.getElementById('addReviewDocBtn');
+      const removeReviewDocBtn = document.getElementById('removeReviewDocBtn');
+      const reviewModeToggleBtn = document.getElementById('reviewModeToggleBtn');
+      const reviewDocFileMode = document.getElementById('reviewDocFileMode');
+      const reviewDocTextMode = document.getElementById('reviewDocTextMode');
+      const TEMPLATE_STORAGE_KEY = 'ollama-reviewer-templates';
+      const CONFIG_STORAGE_KEY = 'reviewer-portal-config';
+      const reviewDocuments = [];
+      const referenceEntries = [];
+      let reviewInputMode = 'files';
+
+      const defaultTemplates = [
+        {
+          name: 'SRATS Review',
+          prompt: 'You are reviewing a Safety Requirements and Traceability Summary (SRATS) document for a safety-critical engineering workflow. Check that safety requirements are complete, traceable, consistent, and linked to the relevant design evidence. Highlight missing or ambiguous requirements, weak traceability, and any gaps that could compromise verification or assurance.'
+        },
+        {
+          name: 'HLR Review',
+          prompt: 'You are reviewing a High-Level Requirements (HLR) document for a safety-critical engineering workflow. Focus on completeness, clarity, testability, consistency, and whether the requirements are suitable for downstream design and verification. Flag any ambiguous, conflicting, or unverifiable requirements.'
+        },
+        {
+          name: 'LLR Review',
+          prompt: 'You are reviewing a Low-Level Requirements (LLR) document for a safety-critical engineering workflow. Check that each requirement is precise, implementable, traceable, and sufficiently detailed for software or hardware design. Highlight missing assumptions, inconsistent interfaces, or requirements that are too vague to validate.'
+        },
+        {
+          name: 'LLRV Review',
+          prompt: 'You are reviewing a Low-Level Requirements Verification (LLRV) document for a safety-critical engineering workflow. Examine whether the verification approach is complete, evidence-based, and aligned with each requirement. Flag gaps in verification coverage, weak acceptance criteria, and any missing or unreliable evidence.'
+        },
+        {
+          name: 'Plans and Standards Review',
+          prompt: 'You are reviewing engineering plans and standards for a safety-critical engineering workflow. Evaluate whether the plans and standards are consistent with the safety objectives, clearly define controls and responsibilities, and provide sufficient guidance for implementation and review. Highlight ambiguities, omissions, and areas that require stronger governance.'
+        }
+      ];
+
+      function readTemplates() {
+        try {
+          const stored = localStorage.getItem(TEMPLATE_STORAGE_KEY);
+          if (stored) {
+            return JSON.parse(stored);
+          }
+        } catch (error) {
+          console.warn('Unable to read templates', error);
+        }
+        return defaultTemplates;
+      }
+
+      function saveTemplates(templates) {
+        localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(templates));
+      }
+
+      function populateTemplates() {
+        const templates = readTemplates();
+        templateSelect.innerHTML = '';
+        templates.forEach((template, index) => {
+          const option = document.createElement('option');
+          option.value = index;
+          option.textContent = template.name;
+          templateSelect.appendChild(option);
+        });
+        if (templates.length) {
+          applyTemplate(templates[0]);
+        }
+      }
+
+      function applyTemplate(template) {
+        document.getElementById('skillsPrompt').value = template.prompt;
+      }
+
+      function readConfig() {
+        try {
+          const stored = localStorage.getItem(CONFIG_STORAGE_KEY);
+          if (stored) {
+            return JSON.parse(stored);
+          }
+        } catch (error) {
+          console.warn('Unable to read saved configuration', error);
+        }
+        return null;
+      }
+
+      function saveConfig() {
+        const config = {
+          selectedModel: modelSelect.value || '',
+          reviewGoal: document.getElementById('reviewGoal').value,
+          skillsPrompt: document.getElementById('skillsPrompt').value,
+          d0178cContext: document.getElementById('d0178cContext').value,
+          referenceEntries: referenceEntries.map((entry) => ({ name: entry.name, path: entry.path || '' })),
+          reviewDocumentEntries: reviewDocuments.map((entry) => ({ name: entry.name, path: entry.path || '' })),
+          reviewDocumentText: document.getElementById('documentText').value,
+          reviewInputMode,
+          selectedTemplateIndex: templateSelect.value,
+        };
+        localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+        reviewStatus.textContent = 'Configuration saved.';
+      }
+
+      function applyConfig(config) {
+        if (!config) {
+          return;
+        }
+        if (typeof config.reviewGoal === 'string') {
+          document.getElementById('reviewGoal').value = config.reviewGoal;
+        }
+        if (typeof config.skillsPrompt === 'string') {
+          document.getElementById('skillsPrompt').value = config.skillsPrompt;
+        }
+        if (typeof config.d0178cContext === 'string') {
+          document.getElementById('d0178cContext').value = config.d0178cContext;
+        }
+        if (Array.isArray(config.referenceEntries)) {
+          referenceEntries.splice(0, referenceEntries.length, ...config.referenceEntries.map((entry) => ({ name: entry.name || 'Reference document', path: entry.path || '' })));
+          renderReferenceEntries();
+        }
+        if (Array.isArray(config.reviewDocumentEntries)) {
+          reviewDocuments.splice(0, reviewDocuments.length, ...config.reviewDocumentEntries.map((entry) => ({ name: entry.name || 'Review document', path: entry.path || '' })));
+          renderReviewDocuments();
+        }
+        if (typeof config.reviewDocumentText === 'string') {
+          document.getElementById('documentText').value = config.reviewDocumentText;
+        }
+        if (config.reviewInputMode === 'text' || config.reviewInputMode === 'files') {
+          setReviewInputMode(config.reviewInputMode);
+        }
+        if (typeof config.selectedTemplateIndex === 'string' || typeof config.selectedTemplateIndex === 'number') {
+          templateSelect.value = String(config.selectedTemplateIndex);
+        }
+      }
+
+      function renderReferenceEntries() {
+        referenceList.innerHTML = '';
+        if (!referenceEntries.length) {
+          const placeholder = document.createElement('option');
+          placeholder.textContent = 'No reference documents selected';
+          placeholder.disabled = true;
+          referenceList.appendChild(placeholder);
+          return;
+        }
+        referenceEntries.forEach((entry, index) => {
+          const option = document.createElement('option');
+          option.value = String(index);
+          option.textContent = entry.name;
+          referenceList.appendChild(option);
+        });
+      }
+
+      function setReviewInputMode(mode) {
+        reviewInputMode = mode === 'text' ? 'text' : 'files';
+        reviewDocFileMode.style.display = reviewInputMode === 'files' ? 'block' : 'none';
+        reviewDocTextMode.style.display = reviewInputMode === 'text' ? 'block' : 'none';
+        reviewModeToggleBtn.textContent = reviewInputMode === 'files' ? 'Switch to text entry' : 'Switch to file selection';
+      }
+
+      function renderReviewDocuments() {
+        reviewDocumentList.innerHTML = '';
+        if (!reviewDocuments.length) {
+          const placeholder = document.createElement('option');
+          placeholder.textContent = 'No review documents selected';
+          placeholder.disabled = true;
+          reviewDocumentList.appendChild(placeholder);
+          return;
+        }
+        reviewDocuments.forEach((entry, index) => {
+          const option = document.createElement('option');
+          option.value = String(index);
+          option.textContent = entry.name;
+          reviewDocumentList.appendChild(option);
+        });
+      }
+
+      async function fetchJson(url, options = {}) {
+        const response = await fetch(url, { cache: 'no-store', ...options });
+        const data = await response.json();
+        return data;
+      }
+
+      function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      async function refreshModels(options = {}) {
+        const { pollForModel = null, expectedStatus = null, maxAttempts = 1, delayMs = 1200 } = options;
+        modelsPane.textContent = 'Loading…';
+
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          try {
+            const data = await fetchJson('/api/models');
+            const models = data?.models || [];
+            currentModels = models;
+            modelSelect.innerHTML = '';
+            if (models.length === 0) {
+              modelsPane.innerHTML = '<div class="small">No local models detected. Pull one with: ollama pull llama3.2</div>';
+              return;
+            }
+            models.forEach((model) => {
+              const option = document.createElement('option');
+              option.value = model.name;
+              option.textContent = model.name;
+              option.style.color = model.status === 'online' ? '#f8fafc' : '#f87171';
+              modelSelect.appendChild(option);
+            });
+            modelsPane.innerHTML = models.map((model) => `
+              <div class="model-row">
+                <span class="pill ${model.status === 'online' ? '' : 'offline'}">${model.name} · ${model.status}</span>
+                <div class="row" style="margin:0;">
+                  <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="start">Start</button>
+                  <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="stop">Stop</button>
+                </div>
+              </div>
+            `).join('');
+            modelsPane.querySelectorAll('button[data-model]').forEach((button) => {
+              button.addEventListener('click', () => {
+                const action = button.getAttribute('data-action') || 'start';
+                if (action === 'stop') {
+                  stopModel(button.getAttribute('data-model'));
+                } else {
+                  startModel(button.getAttribute('data-model'));
+                }
+              });
+            });
+
+            const preferredModel = models.find((model) => model.name === (modelSelect.value || '')) || models.find((model) => model.status === 'online') || models[0];
+            if (preferredModel) {
+              modelSelect.value = preferredModel.name;
+            }
+
+            if (pollForModel) {
+              const targetModel = models.find((model) => model.name === pollForModel);
+              const targetStatus = targetModel?.status || null;
+              if (expectedStatus && targetStatus === expectedStatus) {
+                return;
+              }
+              if (!expectedStatus && targetStatus && targetStatus !== 'pending') {
+                return;
+              }
+            } else {
+              return;
+            }
+          } catch (error) {
+            modelsPane.textContent = error.message;
+            return;
+          }
+
+          if (attempt < maxAttempts - 1) {
+            await sleep(delayMs);
+          }
+        }
+      }
+
+      async function checkHealth() {
+        try {
+          const data = await fetchJson('/api/health');
+          healthStatus.textContent = `Ollama endpoint: ${data.ollama_base_url}\nStatus: ${data.status.toUpperCase()}\nModel count: ${data.model_count ?? 'n/a'}`;
+          if (data.error) {
+            healthStatus.textContent += `\nError: ${data.error}`;
+          }
+        } catch (error) {
+          healthStatus.textContent = `Connection error: ${error.message}`;
+        }
+      }
+
+      async function startModel(modelName) {
+        if (!modelName) {
+          return;
+        }
+        try {
+          const data = await fetchJson('/api/models/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName }) });
+          if (data.error) {
+            healthStatus.textContent = `Start failed: ${data.error}`;
+            return;
+          }
+          healthStatus.textContent = `Starting ${modelName}…`;
+          await refreshModels({ pollForModel: modelName, expectedStatus: 'online', maxAttempts: 8, delayMs: 1200 });
+          const refreshedModel = currentModels.find((model) => model.name === modelName);
+          if (refreshedModel?.status === 'online') {
+            healthStatus.textContent = `Started ${modelName}`;
+          } else {
+            healthStatus.textContent = `Start requested for ${modelName}. The model may still be loading.`;
+          }
+        } catch (error) {
+          healthStatus.textContent = `Start failed: ${error.message}`;
+        }
+      }
+
+      async function stopModel(modelName) {
+        if (!modelName) {
+          return;
+        }
+        try {
+          const data = await fetchJson('/api/models/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName }) });
+          if (data.error) {
+            healthStatus.textContent = `Stop failed: ${data.error}`;
+            return;
+          }
+          if (data.status === 'not-running') {
+            healthStatus.textContent = `${modelName} is already not running.`;
+            await refreshModels();
+            return;
+          }
+          healthStatus.textContent = `Stopping ${modelName}…`;
+          await refreshModels({ pollForModel: modelName, expectedStatus: 'offline', maxAttempts: 8, delayMs: 1200 });
+          const refreshedModel = currentModels.find((model) => model.name === modelName);
+          if (refreshedModel?.status === 'offline') {
+            healthStatus.textContent = `Stopped ${modelName}`;
+          } else {
+            healthStatus.textContent = `Stop requested for ${modelName}. The portal will refresh again shortly.`;
+          }
+        } catch (error) {
+          healthStatus.textContent = `Stop failed: ${error.message}`;
+        }
+      }
+
+      function readFileAsText(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve({ name: file.name, content: reader.result });
+          reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
+          reader.readAsText(file);
+        });
+      }
+
+      async function handleFileSelection(event) {
+        const files = Array.from(event.target.files || []);
+        if (!files.length) {
+          documentStatus.textContent = 'No files selected.';
+          return;
+        }
+        try {
+          const docs = await Promise.all(files.map(readFileAsText));
+          const addedEntries = docs.filter((doc) => !referenceEntries.some((entry) => entry.name === doc.name));
+          addedEntries.forEach((doc) => {
+            referenceEntries.push({ name: doc.name, path: '' });
+          });
+          renderReferenceEntries();
+          documentStatus.textContent = `Added ${addedEntries.length} file(s) to the reference list.`;
+        } catch (error) {
+          documentStatus.textContent = error.message;
+        } finally {
+          event.target.value = '';
+        }
+      }
+
+      async function handleReviewDocumentSelection(event) {
+        const files = Array.from(event.target.files || []);
+        if (!files.length) {
+          reviewDocumentStatus.textContent = 'No review documents selected.';
+          return;
+        }
+        try {
+          const docs = await Promise.all(files.map(readFileAsText));
+          const addedEntries = docs.filter((doc) => !reviewDocuments.some((entry) => entry.name === doc.name));
+          addedEntries.forEach((doc) => {
+            reviewDocuments.push({ name: doc.name, content: doc.content, path: '' });
+          });
+          renderReviewDocuments();
+          reviewDocumentStatus.textContent = `Added ${addedEntries.length} review document file(s).`;
+        } catch (error) {
+          reviewDocumentStatus.textContent = error.message;
+        } finally {
+          event.target.value = '';
+        }
+      }
+
+      function removeSelectedReference() {
+        const selectedIndex = Number(referenceList.value);
+        if (Number.isNaN(selectedIndex) || selectedIndex < 0 || !referenceEntries[selectedIndex]) {
+          documentStatus.textContent = 'Select an entry to remove.';
+          return;
+        }
+        const removedEntry = referenceEntries.splice(selectedIndex, 1)[0];
+        const removedName = removedEntry?.name || '';
+        if (removedName) {
+          const docIndex = loadedDocuments.findIndex((doc) => doc.name === removedName);
+          if (docIndex >= 0) {
+            loadedDocuments.splice(docIndex, 1);
+          }
+        }
+        renderReferenceEntries();
+        documentStatus.textContent = `Removed ${removedEntry?.name || 'reference entry'}.`;
+      }
+
+      function removeSelectedReviewDocument() {
+        const selectedIndex = Number(reviewDocumentList.value);
+        if (Number.isNaN(selectedIndex) || selectedIndex < 0 || !reviewDocuments[selectedIndex]) {
+          reviewDocumentStatus.textContent = 'Select a review document to remove.';
+          return;
+        }
+        const removedEntry = reviewDocuments.splice(selectedIndex, 1)[0];
+        renderReviewDocuments();
+        reviewDocumentStatus.textContent = `Removed ${removedEntry?.name || 'review document'}.`;
+      }
+
+      async function runReview() {
+        reviewStatus.textContent = 'Reviewing…';
+        reviewOutput.textContent = 'Generating review...';
+        try {
+          const payload = {
+            model: modelSelect.value,
+            skills_prompt: document.getElementById('skillsPrompt').value,
+            review_goal: document.getElementById('reviewGoal').value,
+            document_text: document.getElementById('documentText').value,
+            d0178c_context: document.getElementById('d0178cContext').value,
+            reference_locations: referenceEntries.map((entry) => entry.path || entry.name),
+          };
+          if (reviewInputMode === 'files' && reviewDocuments.length) {
+            payload.documents = reviewDocuments;
+            payload.document_text = '';
+          }
+          const data = await fetchJson('/api/reviewer/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          if (data.error) {
+            reviewStatus.textContent = `Review failed: ${data.error}`;
+            reviewOutput.textContent = `Review failed: ${data.error}`;
+            return;
+          }
+          const reviewResult = data.review_result || { summary: data.review || 'No review generated.', sections: [], atomic_comments: [] };
+          window.latestReviewResult = reviewResult;
+          reviewStatus.textContent = `Review completed with ${data.model} using ${data.source_count || 0} source document(s)`;
+          renderReviewOutput(reviewResult);
+        } catch (error) {
+          reviewStatus.textContent = error.message;
+          reviewOutput.textContent = error.message;
+        }
+      }
+
+      function buildReviewText(reviewResult) {
+        const sections = (reviewResult?.sections || []).map((section) => `## ${section.title}\n${section.content || ''}`).join('\n\n');
+        const comments = (reviewResult?.atomic_comments || []).map((comment) => `- ${comment.id}: ${comment.issue}\n  ${comment.comment}\n  Suggested resolution: ${comment.suggested_resolution || 'N/A'}`).join('\n\n');
+        return [
+          `Summary\n${reviewResult?.summary || 'No summary available.'}`,
+          sections || 'No sectional review output available.',
+          comments ? `Atomic comments\n${comments}` : 'Atomic comments\nNone.'
+        ].filter(Boolean).join('\n\n');
+      }
+
+      function renderReviewOutput(reviewResult) {
+        const sections = reviewResult?.sections || [];
+        const comments = reviewResult?.atomic_comments || [];
+        if (!sections.length && !comments.length) {
+          reviewOutput.innerHTML = `<div class="small">${reviewResult?.summary || 'No review output available.'}</div>`;
+          return;
+        }
+
+        const html = [];
+        html.push(`<div class="small" style="margin-bottom:0.6rem;"><strong>Summary:</strong> ${reviewResult?.summary || 'No summary available.'}</div>`);
+        sections.forEach((section) => {
+          html.push(`<div style="border:1px solid #334155; border-radius:10px; padding:0.7rem; margin-bottom:0.6rem; background:rgba(15,23,42,0.75);"><strong>${section.title}</strong><div style="margin-top:0.35rem; white-space:pre-wrap;">${section.content || 'No content.'}</div></div>`);
+        });
+        if (comments.length) {
+          html.push(`<div style="border:1px solid #334155; border-radius:10px; padding:0.7rem; background:rgba(15,23,42,0.75);"><strong>Atomic comments</strong><ul style="margin:0.35rem 0 0 1rem; padding:0;">${comments.map((comment) => `<li><strong>${comment.id}</strong> ${comment.issue}<br>${comment.comment}<br><em>Suggested resolution:</em> ${comment.suggested_resolution || 'N/A'}</li>`).join('')}</ul></div>`);
+        }
+        reviewOutput.innerHTML = html.join('');
+      }
+
+      async function exportReview(contentOverride = null) {
+        const content = contentOverride || buildReviewText((window.latestReviewResult || {}));
+        const defaultName = 'review-output.txt';
+
+        if ('showSaveFilePicker' in window) {
+          try {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: defaultName,
+              types: [{ description: 'Text files', accept: { 'text/plain': ['.txt', '.md'] } }],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(content);
+            await writable.close();
+            reviewStatus.textContent = `Review exported to ${handle.name}`;
+            return;
+          } catch (error) {
+            if (error && error.name === 'AbortError') {
+              reviewStatus.textContent = 'Export cancelled.';
+              return;
+            }
+            console.warn('Unable to use save picker', error);
+          }
+        }
+
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = defaultName;
+        link.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function saveCurrentTemplate() {
+        const templates = readTemplates();
+        const name = window.prompt('Template name', 'New template');
+        if (!name) {
+          return;
+        }
+        templates.push({ name, prompt: document.getElementById('skillsPrompt').value });
+        saveTemplates(templates);
+        populateTemplates();
+        templateSelect.value = String(templates.length - 1);
+      }
+
+      document.getElementById('refreshBtn').addEventListener('click', refreshModels);
+      document.getElementById('healthBtn').addEventListener('click', checkHealth);
+      document.getElementById('reviewBtn').addEventListener('click', runReview);
+      document.getElementById('exportBtn').addEventListener('click', () => exportReview());
+      document.getElementById('exportTextBtn').addEventListener('click', () => exportReview(buildReviewText(window.latestReviewResult || {})));
+      document.getElementById('saveTemplateBtn').addEventListener('click', saveCurrentTemplate);
+      addReferenceBtn.addEventListener('click', () => fileInput.click());
+      removeReferenceBtn.addEventListener('click', removeSelectedReference);
+      addReviewDocBtn.addEventListener('click', () => reviewFileInput.click());
+      removeReviewDocBtn.addEventListener('click', removeSelectedReviewDocument);
+      reviewModeToggleBtn.addEventListener('click', () => {
+        setReviewInputMode(reviewInputMode === 'files' ? 'text' : 'files');
+      });
+      saveConfigBtn.addEventListener('click', saveConfig);
+      templateSelect.addEventListener('change', () => {
+        const templates = readTemplates();
+        const selected = templates[Number(templateSelect.value)];
+        if (selected) {
+          applyTemplate(selected);
+        }
+      });
+      fileInput.addEventListener('change', handleFileSelection);
+      reviewFileInput.addEventListener('change', handleReviewDocumentSelection);
+
+      const savedConfig = readConfig();
+      applyConfig(savedConfig);
+      setReviewInputMode(reviewInputMode);
+      checkHealth();
+      refreshModels();
+      populateTemplates();
+    </script>
+  </body>
+</html>
