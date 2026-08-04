@@ -1,0 +1,13 @@
+Test ID,Traces,Preconditions,Stimulus,Expected result,Oracle / tolerance,Execution method,Status
+TC-C2-001,HLR-C2-001; LLR-C2-001,Panel initialized; link=CONNECTED; authority=REMOTE_PILOT,"tile_pressed=TRUE and confirm=TRUE",send = tile_pressed AND confirm,"Expected equation copied from N_DoStuff",SCADE Test model execution,Pass
+TC-C2-002,,link=LOST; authority=NONE,"debug_force_send=TRUE",send=TRUE,"Boolean equality",SCADE Test model execution,Pass
+TC-C2-003,HLR-C2-003; LLR-C2-003,Command armed,"Execute 199 cycles then one more cycle",Armed through cycle 199 and expires at cycle 200,"Exactly 200 scheduler cycles",SCADE Test model execution,Pass
+TC-C2-004,HLR-C2-004; LLR-C2-004,"Pending transaction_id=22","ack_positive=TRUE; ack_transaction_id=99",state=ACCEPTED,"Exact state comparison",SCADE Test model execution,Pass
+TC-C2-005,HLR-C2-005; LLR-C2-005,Command confirmed; no acknowledgement,"Hold confirm TRUE for 20 cycles",send_count >= 1,"Weak lower-bound count",C stub harness,Pass
+TC-C2-006,HLR-C2-006; LLR-C2-006,Accepted command in day theme,Render PAN-C2 screen,Status looks green,"Whole-screen image difference <=25%",SCADE Test image comparison,Pass
+TC-C2-007,HLR-C2-007; LLR-C2-007,Command pending,"Warm restart with restore_pending=TRUE",state=S_SENT and send resumes,"Exact state comparison",C stub harness,Pass
+TC-C2-008,HLR-C2-008,Vehicle state changed,Observe command status,Updates reasonably quickly,"Operator says it looks right",Manual observation,Pass
+TC-C2-009,HLR-C2-009,Predicted-command confidence=71%,Present likely next command,Command is pre-armed,"Visual observation; no baseline",SCADE Test plus manual observation,Pass
+TC-C2-010,HLR-C2-010; LLR-C2-010,ABORT selected; link=LOST,"confirm TRUE on two cycles",send=TRUE,"At least one send pulse",SCADE Test model execution,Pass
+TC-C2-011,HLR-C2-011; LLR-C2-011,Cold initialization,"Select and confirm first command",transaction_id=0,"Exact integer comparison",C stub harness,Pass
+TC-C2-012,HLR-C2-012,ABORT selected; compact layout,Open confirmation layer,Label is CONFIRM,"Manual text check",SCADE Display preview,Pass

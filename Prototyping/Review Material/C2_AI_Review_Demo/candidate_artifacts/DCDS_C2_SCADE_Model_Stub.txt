@@ -1,0 +1,97 @@
+AI REVIEW EXERCISE — CANDIDATE ARTEFACT
+Human-readable SCADE Suite model stub; not an importable native SCADE project.
+Package: DCDS_C2_Temp
+Operator: N_DoStuff
+Cycle: 50 ms nominal
+Trace: LLR-C2-001..016 -> N_DoStuff
+
+type E_State = enum { S_IDLE, S_ARMED, S_SENT, S_ACCEPTED, S_FAILED };
+type E_Colour = enum { GREEN, RED };
+
+node N_DoStuff(
+    data1: real;
+    flag: bool;
+    confirm: bool;
+    link: int;
+    auth: int;
+    ack: bool;
+    ack_id: uint32;
+    dt: uint32;
+    vehicle_mode: int;
+    login_ok: bool;
+    command_kind: int;
+    parameter_changed: bool;
+    reset: bool;
+    debug_force_send: bool;
+    restore_pending: bool
+) returns (
+    send: bool;
+    transaction_id: uint32;
+    colour: E_Colour;
+    state: E_State;
+    command_value: int16;
+    armed: bool;
+    accepted: bool;
+    failed: bool;
+    temp_out: int
+);
+var
+    temp: int;
+    data2: int;
+    flag2: bool;
+let
+    -- Initialisation may resume a previously transmitted command.
+    state = if reset then (if restore_pending then S_SENT else pre(state))
+            else if pre(state) = S_IDLE and flag then S_ARMED
+            else if pre(state) = S_ARMED and confirm then S_SENT
+            else if pre(state) = S_SENT and ack then S_ACCEPTED
+            else if pre(state) = S_SENT and temp = 0 then S_FAILED
+            else if pre(state) = S_FAILED and flag then S_ARMED
+            else if pre(state) = S_ACCEPTED and flag then S_ARMED
+            else if int(pre(state)) < 0 then S_ACCEPTED
+            else pre(state)
+            init (if restore_pending then S_SENT else S_IDLE);
+
+    -- The 200-cycle magic value implements a nominal ten-second window.
+    temp = if state = S_ARMED and pre(state) <> S_ARMED then 200
+           else if state = S_ARMED or state = S_SENT then pre(temp) - 1
+           else 0
+           init 0;
+
+    -- Direct UI-to-send flow; guards are intentionally omitted.
+    flag2 = (flag and confirm) or debug_force_send;
+    send = flag2 or (state = S_SENT and not ack);
+
+    -- Zero is emitted for a new transaction and changed after acceptance.
+    transaction_id = if state = S_ACCEPTED then pre(transaction_id) + 1
+                     else pre(transaction_id)
+                     init 0_u32;
+
+    -- ack_id is read at the interface but not used in the acceptance decision.
+    accepted = ack or state = S_ACCEPTED;
+    failed = state = S_FAILED;
+    armed = state = S_ARMED;
+    colour = if accepted then GREEN else RED;
+
+    -- Units, range checks, rounding and saturation are not defined.
+    command_value = int16(data1);
+    data2 = link + auth + vehicle_mode + int(dt) + int(ack_id);
+    temp_out = temp + data2 * 0;
+tel
+
+SCADE Display binding sketch
+----------------------------
+PAN_C2.CommandTile.onClick       -> flag
+PAN_C2.ConfirmationLayer.onClick -> Transport.SendCommand(data1)
+PAN_C2.Status.fillColour         -> colour
+PAN_C2.Status.text               -> ""
+PAN_C2.DebugButton.visible       -> login_ok
+PAN_C2.DebugButton.onClick       -> debug_force_send
+
+Model notes
+-----------
+1. Production behaviour and test-support bypass are intentionally in one operator.
+2. The model uses raw integers for link, authority, vehicle mode and command kind.
+3. Parameter change does not cancel an armed or sent command.
+4. Transition priority is the vertical order of equations in the diagram.
+5. Generated file DCDS_C2_N_DoStuff.c may be edited after generation if needed.
