@@ -9,28 +9,30 @@
   <body>
     <div class="app-shell">
       <div class="hero">
-        <h1>Reviewer Portal</h1>
-        <p class="small">Inspect local models, load review documents, and run structured safety-critical engineering reviews from a single local interface.</p>
+        <h1>Safety Review Assistant</h1>
+        <p class="small">A local prototype for reviewing engineering artefacts, standards context, and supporting evidence with structured guidance and clear review output.</p>
       </div>
 
       <div class="grid">
         <section class="panel">
-        <h2>1. Connect to models</h2>
+        <h2>1. Model access</h2>
+        <p class="section-intro">Connect to local Ollama models and confirm the selected engine is ready before running a review.</p>
         <div class="row">
           <button id="refreshBtn">Refresh models</button>
           <button id="healthBtn" class="secondary">Check health</button>
         </div>
-        <div id="healthStatus" class="status">Waiting…</div>
+        <div id="healthStatus" class="status status-ready">Ready to review.</div>
         <h3>Installed models</h3>
-        <div id="models" class="model-list">Loading…</div>
+        <div id="models" class="model-list">Loading available models…</div>
       </section>
 
       <section class="panel">
-        <h2>2. Reviewer configuration</h2>
+        <h2>2. Review configuration</h2>
+        <p class="section-intro">Choose the model, review template, and supporting context for the artefact under review.</p>
         <label>Model
           <select id="modelSelect"></select>
         </label>
-        <label>Prompt template
+        <label>Review template
           <select id="templateSelect"></select>
         </label>
         <div class="row">
@@ -63,7 +65,7 @@
           <select id="referenceList" class="reference-list" size="4"></select>
           <input id="fileInput" type="file" multiple style="display:none;" />
         </label>
-        <div id="documentStatus" class="muted">No files selected. Use the button above to add reference documentation.</div>
+        <div id="documentStatus" class="muted">No reference documents have been added yet.</div>
         <label>Documentation to review
           <div class="row" style="margin-top:0.25rem;">
             <button id="reviewModeToggleBtn" class="secondary" type="button">Switch to text entry</button>
@@ -77,16 +79,25 @@
           <div id="reviewDocTextMode" style="display:none;">
             <textarea id="documentText" rows="8" placeholder="Paste design notes, process documentation, or requirements here..."></textarea>
           </div>
-          <div id="reviewDocumentStatus" class="muted">No document files selected. Use the controls above to add documentation.</div>
+          <div id="reviewDocumentStatus" class="muted">No review documents have been added yet.</div>
         </label>
         <button id="reviewBtn">Run review</button>
-        <div id="reviewStatus" class="status">No review yet.</div>
+        <button id="traceabilityBtn" class="secondary" type="button">Show traceability analysis</button>
+        <div id="reviewStatus" class="status status-ready">Awaiting review request.</div>
       </section>
       </div>
 
-      <section class="panel">
+      <section class="panel review-panel">
         <h2>3. Review output</h2>
-        <div id="reviewOutput" class="status review-output">The review will appear here.</div>
+        <div class="row" style="margin-top:0.25rem;">
+          <button id="downloadReviewTextBtn" class="secondary" type="button">Download text file</button>
+        </div>
+        <div id="reviewOutput" class="status review-output review-output-ready">The structured review will appear here.</div>
+      </section>
+
+      <section id="traceabilityPanel" class="panel review-panel" style="display:none;">
+        <h2>4. Traceability analysis</h2>
+        <div id="traceabilityOutput" class="status review-output review-output-ready">Traceability analysis will appear here.</div>
       </section>
     </div>
 
@@ -97,6 +108,8 @@
       const reviewStatus = document.getElementById('reviewStatus');
       let currentModels = [];
       const reviewOutput = document.getElementById('reviewOutput');
+      const traceabilityPanel = document.getElementById('traceabilityPanel');
+      const traceabilityOutput = document.getElementById('traceabilityOutput');
       const templateSelect = document.getElementById('templateSelect');
       const documentStatus = document.getElementById('documentStatus');
       const fileInput = document.getElementById('fileInput');
@@ -276,6 +289,22 @@
         });
       }
 
+      function getSelectedEntryIndex(selectElement, entries) {
+        const selectedOption = selectElement.selectedOptions[0];
+        const selectedValue = selectedOption?.value ?? '';
+        const valueIndex = Number(selectedValue);
+        if (Number.isInteger(valueIndex) && valueIndex >= 0 && entries[valueIndex]) {
+          return valueIndex;
+        }
+
+        const selectedIndex = selectElement.selectedIndex;
+        if (selectedIndex >= 0 && entries[selectedIndex]) {
+          return selectedIndex;
+        }
+
+        return -1;
+      }
+
       async function fetchJson(url, options = {}) {
         const response = await fetch(url, { cache: 'no-store', ...options });
         const data = await response.json();
@@ -312,6 +341,7 @@
                 <span class="pill ${model.status === 'online' ? '' : 'offline'}">${model.name} · ${model.status}</span>
                 <div class="row" style="margin:0;">
                   <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="start">Start</button>
+                  <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="ready">Check ready</button>
                   <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="stop">Stop</button>
                 </div>
               </div>
@@ -321,6 +351,8 @@
                 const action = button.getAttribute('data-action') || 'start';
                 if (action === 'stop') {
                   stopModel(button.getAttribute('data-model'));
+                } else if (action === 'ready') {
+                  checkModelReady(button.getAttribute('data-model'));
                 } else {
                   startModel(button.getAttribute('data-model'));
                 }
@@ -372,21 +404,53 @@
           return;
         }
         try {
+          healthStatus.textContent = `Loading ${modelName} and checking readiness...`;
           const data = await fetchJson('/api/models/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName }) });
           if (data.error) {
             healthStatus.textContent = `Start failed: ${data.error}`;
+            return;
+          }
+          if (!data.ok) {
+            healthStatus.textContent = `Start failed: ${data.error || data.note || 'The model did not become ready.'}`;
+            await refreshModels();
             return;
           }
           healthStatus.textContent = `Starting ${modelName}…`;
           await refreshModels({ pollForModel: modelName, expectedStatus: 'online', maxAttempts: 8, delayMs: 1200 });
           const refreshedModel = currentModels.find((model) => model.name === modelName);
           if (refreshedModel?.status === 'online') {
-            healthStatus.textContent = `Started ${modelName}`;
+            healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s.` : `Started ${modelName}`;
           } else {
             healthStatus.textContent = `Start requested for ${modelName}. The model may still be loading.`;
           }
         } catch (error) {
           healthStatus.textContent = `Start failed: ${error.message}`;
+        }
+      }
+
+      async function checkModelReady(modelName) {
+        if (!modelName) {
+          return;
+        }
+        try {
+          healthStatus.textContent = `Checking whether ${modelName} can respond...`;
+          const data = await fetchJson('/api/models/ready', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName }) });
+          await refreshModels();
+          if (data.error) {
+            if (String(data.error).toLowerCase() === 'not found') {
+              healthStatus.textContent = 'Ready check endpoint is not available yet. Restart the Python demo server so the updated server.py is loaded.';
+              return;
+            }
+            healthStatus.textContent = `Ready check failed: ${data.error}`;
+            return;
+          }
+          if (data.ready || data.status === 'ready') {
+            healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s.` : `Ready: ${modelName} responded.`;
+            return;
+          }
+          healthStatus.textContent = `Not ready: ${data.error || data.reason || 'The model did not answer the readiness probe.'}`;
+        } catch (error) {
+          healthStatus.textContent = `Ready check failed: ${error.message}`;
         }
       }
 
@@ -418,12 +482,36 @@
         }
       }
 
-      function readFileAsText(file) {
+      function arrayBufferToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        const chunkSize = 0x8000;
+        let binary = '';
+        for (let index = 0; index < bytes.length; index += chunkSize) {
+          const chunk = bytes.subarray(index, index + chunkSize);
+          binary += String.fromCharCode(...chunk);
+        }
+        return btoa(binary);
+      }
+
+      function readFileAsDocument(file) {
         return new Promise((resolve, reject) => {
           const reader = new FileReader();
-          reader.onload = () => resolve({ name: file.name, content: reader.result });
+          reader.onload = () => {
+            const buffer = reader.result;
+            const isTextLike = file.type.startsWith('text/') || /\.(txt|md|rtf|json|csv|tsv|log|ya?ml|xml|html?|toml|ini|cfg|conf|rst|py|c|h|cc|hh|cpp|hpp|cxx|hxx|js|jsx|ts|tsx|java|cs|sql|sh|bat|ps1|m|mm|s|asm)$/i.test(file.name);
+            const document = {
+              name: file.name,
+              data_base64: arrayBufferToBase64(buffer),
+              mime_type: file.type || '',
+              path: '',
+            };
+            if (isTextLike) {
+              document.content = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+            }
+            resolve(document);
+          };
           reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
-          reader.readAsText(file);
+          reader.readAsArrayBuffer(file);
         });
       }
 
@@ -434,10 +522,10 @@
           return;
         }
         try {
-          const docs = await Promise.all(files.map(readFileAsText));
+          const docs = await Promise.all(files.map(readFileAsDocument));
           const addedEntries = docs.filter((doc) => !referenceEntries.some((entry) => entry.name === doc.name));
           addedEntries.forEach((doc) => {
-            referenceEntries.push({ name: doc.name, path: '' });
+            referenceEntries.push(doc);
           });
           renderReferenceEntries();
           documentStatus.textContent = `Added ${addedEntries.length} file(s) to the reference list.`;
@@ -455,10 +543,10 @@
           return;
         }
         try {
-          const docs = await Promise.all(files.map(readFileAsText));
+          const docs = await Promise.all(files.map(readFileAsDocument));
           const addedEntries = docs.filter((doc) => !reviewDocuments.some((entry) => entry.name === doc.name));
           addedEntries.forEach((doc) => {
-            reviewDocuments.push({ name: doc.name, content: doc.content, path: '' });
+            reviewDocuments.push(doc);
           });
           renderReviewDocuments();
           reviewDocumentStatus.textContent = `Added ${addedEntries.length} review document file(s).`;
@@ -470,26 +558,19 @@
       }
 
       function removeSelectedReference() {
-        const selectedIndex = Number(referenceList.value);
-        if (Number.isNaN(selectedIndex) || selectedIndex < 0 || !referenceEntries[selectedIndex]) {
+        const selectedIndex = getSelectedEntryIndex(referenceList, referenceEntries);
+        if (selectedIndex < 0) {
           documentStatus.textContent = 'Select an entry to remove.';
           return;
         }
         const removedEntry = referenceEntries.splice(selectedIndex, 1)[0];
-        const removedName = removedEntry?.name || '';
-        if (removedName) {
-          const docIndex = loadedDocuments.findIndex((doc) => doc.name === removedName);
-          if (docIndex >= 0) {
-            loadedDocuments.splice(docIndex, 1);
-          }
-        }
         renderReferenceEntries();
         documentStatus.textContent = `Removed ${removedEntry?.name || 'reference entry'}.`;
       }
 
       function removeSelectedReviewDocument() {
-        const selectedIndex = Number(reviewDocumentList.value);
-        if (Number.isNaN(selectedIndex) || selectedIndex < 0 || !reviewDocuments[selectedIndex]) {
+        const selectedIndex = getSelectedEntryIndex(reviewDocumentList, reviewDocuments);
+        if (selectedIndex < 0) {
           reviewDocumentStatus.textContent = 'Select a review document to remove.';
           return;
         }
@@ -498,22 +579,28 @@
         reviewDocumentStatus.textContent = `Removed ${removedEntry?.name || 'review document'}.`;
       }
 
+      function buildReviewPayload() {
+        const payload = {
+          model: modelSelect.value,
+          skills_prompt: document.getElementById('skillsPrompt').value,
+          review_goal: document.getElementById('reviewGoal').value,
+          document_text: document.getElementById('documentText').value,
+          d0178c_context: document.getElementById('d0178cContext').value,
+          reference_documents: referenceEntries.filter((entry) => entry.content || entry.data_base64),
+          reference_locations: referenceEntries.map((entry) => entry.path).filter(Boolean),
+        };
+        if (reviewInputMode === 'files' && reviewDocuments.length) {
+          payload.documents = reviewDocuments;
+          payload.document_text = '';
+        }
+        return payload;
+      }
+
       async function runReview() {
         reviewStatus.textContent = 'Reviewing…';
         reviewOutput.textContent = 'Generating review...';
         try {
-          const payload = {
-            model: modelSelect.value,
-            skills_prompt: document.getElementById('skillsPrompt').value,
-            review_goal: document.getElementById('reviewGoal').value,
-            document_text: document.getElementById('documentText').value,
-            d0178c_context: document.getElementById('d0178cContext').value,
-            reference_locations: referenceEntries.map((entry) => entry.path || entry.name),
-          };
-          if (reviewInputMode === 'files' && reviewDocuments.length) {
-            payload.documents = reviewDocuments;
-            payload.document_text = '';
-          }
+          const payload = buildReviewPayload();
           const data = await fetchJson('/api/reviewer/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
           if (data.error) {
             reviewStatus.textContent = `Review failed: ${data.error}`;
@@ -530,14 +617,167 @@
         }
       }
 
+      async function runTraceabilityAnalysis() {
+        traceabilityPanel.style.display = 'flex';
+        traceabilityOutput.textContent = 'Building traceability analysis...';
+        reviewStatus.textContent = 'Building traceability analysis.';
+        try {
+          const data = await fetchJson('/api/traceability/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildReviewPayload()) });
+          if (data.error) {
+            traceabilityOutput.textContent = `Traceability analysis failed: ${data.error}`;
+            reviewStatus.textContent = `Traceability analysis failed: ${data.error}`;
+            return;
+          }
+          window.latestTraceabilityAnalysis = data;
+          renderTraceabilityAnalysis(data);
+          reviewStatus.textContent = `Traceability analysis completed with ${data.summary?.requirement_count || 0} requirement(s).`;
+          traceabilityPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch (error) {
+          traceabilityOutput.textContent = `Traceability analysis failed: ${error.message}`;
+          reviewStatus.textContent = `Traceability analysis failed: ${error.message}`;
+        }
+      }
+
+      function renderTraceabilityAnalysis(data) {
+        const artefacts = data?.artefacts || [];
+        const forward = data?.forward || [];
+        const reverse = data?.reverse || [];
+        const unresolved = data?.unresolved_mentions || [];
+        const summary = data?.summary || {};
+        const html = [];
+
+        html.push(`<div class="trace-summary"><span class="pill secondary">${escapeHtml(summary.artefact_count || 0)} artefact(s)</span><span class="pill secondary">${escapeHtml(summary.requirement_count || 0)} requirement(s)</span><span class="pill secondary">${escapeHtml(summary.linked_requirement_count || 0)} linked requirement(s)</span></div>`);
+        html.push('<h3>Requirements by artefact</h3>');
+        if (!artefacts.length) {
+          html.push('<div class="muted">No artefacts were available for analysis.</div>');
+        }
+        artefacts.forEach((artefact) => {
+          html.push(`<div class="trace-artefact"><div><strong>${escapeHtml(artefact.name)}</strong> <span class="pill secondary">${escapeHtml(artefact.role)}</span> <span class="pill secondary">${escapeHtml(artefact.artefact_type)}</span></div>`);
+          const requirements = artefact.requirements || [];
+          if (!requirements.length) {
+            html.push('<div class="muted">No requirement IDs detected.</div></div>');
+            return;
+          }
+          html.push('<table class="trace-table"><thead><tr><th>ID</th><th>Content</th><th>Mentions</th></tr></thead><tbody>');
+          requirements.forEach((requirement) => {
+            html.push(`<tr><td>${escapeHtml(requirement.id)}</td><td>${escapeHtml(requirement.content)}</td><td>${escapeHtml((requirement.mentions || []).join(', ') || '-')}</td></tr>`);
+          });
+          html.push('</tbody></table></div>');
+        });
+
+        html.push(renderTraceLinks('Forward trace SRATS -> HLR -> LLR -> LLRV', forward));
+        html.push(renderTraceLinks('Reverse trace LLRV -> LLR -> HLR -> SRATS', reverse));
+        if (unresolved.length) {
+          html.push('<h3>Unresolved mentions</h3><pre class="trace-copy-block">');
+          html.push(escapeHtml(unresolved.map((item) => `${item.source_id} (${item.source_document}) mentions ${item.mentioned_id}`).join('\n')));
+          html.push('</pre>');
+        }
+        traceabilityOutput.innerHTML = html.join('');
+      }
+
+      function renderTraceLinks(title, links) {
+        if (!links.length) {
+          return `<h3>${escapeHtml(title)}</h3><div class="muted">No explicit requirement ID links detected.</div>`;
+        }
+        const lines = links.map((link) => `${link.source_id} [${link.source_type}] (${link.source_document}) -> ${link.target_id} [${link.target_type}] (${link.target_document})`);
+        return `<h3>${escapeHtml(title)}</h3><pre class="trace-copy-block">${escapeHtml(lines.join('\n'))}</pre>`;
+      }
+
       function buildReviewText(reviewResult) {
-        const sections = (reviewResult?.sections || []).map((section) => `## ${section.title}\n${section.content || ''}`).join('\n\n');
-        const comments = (reviewResult?.atomic_comments || []).map((comment) => `- ${comment.id}: ${comment.issue}\n  ${comment.comment}\n  Suggested resolution: ${comment.suggested_resolution || 'N/A'}`).join('\n\n');
+        const sections = (reviewResult?.sections || []).map((section) => `## ${section.title}\n${normalizeIndentedIssues(section.content || '')}`).join('\n\n');
+        const comments = (reviewResult?.atomic_comments || []).map((comment) => `- ${comment.id}: ${comment.issue}\n  Location: ${stripPageFromLocation(comment.location || 'Not specified')}\n  ${comment.comment}\n  Suggested resolution: ${comment.suggested_resolution || 'N/A'}`).join('\n\n');
         return [
           `Summary\n${reviewResult?.summary || 'No summary available.'}`,
           sections || 'No sectional review output available.',
           comments ? `Atomic comments\n${comments}` : 'Atomic comments\nNone.'
         ].filter(Boolean).join('\n\n');
+      }
+
+      function normalizeIndentedIssues(content) {
+        const lines = String(content || '').split(/\r?\n/);
+        let insideIssue = false;
+        return lines.map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            insideIssue = false;
+            return '';
+          }
+          if (/^(?:[-*]\s*)?Location:/i.test(trimmed)) {
+            insideIssue = true;
+            return `  ${stripPageFromLocation(trimmed.replace(/^[-*]\s*/, ''))}`;
+          }
+          if (insideIssue) {
+            return `    ${trimmed}`;
+          }
+          return line;
+        }).join('\n');
+      }
+
+      function splitSectionIssueBlocks(content) {
+        const text = normalizeIndentedIssues(content || '');
+        const matches = Array.from(text.matchAll(/(^|\n)\s*(?:(?:[-*]|\d+[\).])\s*)?Location:/gi));
+        if (!matches.length) {
+          return { intro: text.trim(), issues: [] };
+        }
+
+        const intro = text.slice(0, matches[0].index).trim();
+        const issues = matches.map((match, index) => {
+          const start = match.index + match[1].length;
+          const end = index + 1 < matches.length ? matches[index + 1].index : text.length;
+          return text.slice(start, end).trim();
+        }).filter(Boolean);
+        return { intro, issues };
+      }
+
+      function renderSectionContent(content) {
+        const parsed = splitSectionIssueBlocks(content || '');
+        const parts = [];
+        if (parsed.intro) {
+          parts.push(`<div class="review-section-content">${escapeHtml(parsed.intro)}</div>`);
+        }
+        parsed.issues.forEach((issue) => {
+          parts.push(`<pre class="review-issue-block">${escapeHtml(issue)}</pre>`);
+        });
+        if (!parts.length) {
+          parts.push('<div class="review-section-content">No content.</div>');
+        }
+        return parts.join('');
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function stripPageFromLocation(value) {
+        return String(value || '')
+          .replace(/\bpage\s+(?:not available in source|\d+(?:\s*\([^)]*\))?)\s*,?\s*/gi, '')
+          .replace(/\|\s*page\s+(?:not available in source|\d+(?:\s*\([^)]*\))?)\s*\|?/gi, '|')
+          .replace(/\s*\|\s*/g, ' | ')
+          .replace(/^\|\s*|\s*\|$/g, '')
+          .replace(/\s+,/g, ',')
+          .replace(/^[\s,-]+|[\s,-]+$/g, '');
+      }
+
+      function hasReviewResult(reviewResult) {
+        return Boolean(
+          reviewResult &&
+          (
+            reviewResult.summary ||
+            (Array.isArray(reviewResult.sections) && reviewResult.sections.length) ||
+            (Array.isArray(reviewResult.atomic_comments) && reviewResult.atomic_comments.length)
+          )
+        );
+      }
+
+      function buildExportFileName() {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const modelName = (modelSelect.value || 'model').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'model';
+        return `review-output-${modelName}-${timestamp}.txt`;
       }
 
       function renderReviewOutput(reviewResult) {
@@ -549,25 +789,31 @@
         }
 
         const html = [];
-        html.push(`<div class="small" style="margin-bottom:0.6rem;"><strong>Summary:</strong> ${reviewResult?.summary || 'No summary available.'}</div>`);
+        html.push(`<div class="small" style="margin-bottom:0.6rem;"><strong>Summary:</strong> ${escapeHtml(reviewResult?.summary || 'No summary available.')}</div>`);
         sections.forEach((section) => {
-          html.push(`<div style="border:1px solid #334155; border-radius:10px; padding:0.7rem; margin-bottom:0.6rem; background:rgba(15,23,42,0.75);"><strong>${section.title}</strong><div style="margin-top:0.35rem; white-space:pre-wrap;">${section.content || 'No content.'}</div></div>`);
+          html.push(`<div class="review-section-box"><strong>${escapeHtml(section.title)}</strong>${renderSectionContent(section.content || 'No content.')}</div>`);
         });
         if (comments.length) {
-          html.push(`<div style="border:1px solid #334155; border-radius:10px; padding:0.7rem; background:rgba(15,23,42,0.75);"><strong>Atomic comments</strong><ul style="margin:0.35rem 0 0 1rem; padding:0;">${comments.map((comment) => `<li><strong>${comment.id}</strong> ${comment.issue}<br>${comment.comment}<br><em>Suggested resolution:</em> ${comment.suggested_resolution || 'N/A'}</li>`).join('')}</ul></div>`);
+          html.push(`<div class="review-section-box"><strong>Atomic comments</strong><ul class="atomic-comment-list">${comments.map((comment) => `<li><strong>${escapeHtml(comment.id)}</strong> ${escapeHtml(comment.issue)}<br><em>Location:</em> ${escapeHtml(stripPageFromLocation(comment.location || 'Not specified'))}<br>${escapeHtml(comment.comment)}<br><em>Suggested resolution:</em> ${escapeHtml(comment.suggested_resolution || 'N/A')}</li>`).join('')}</ul></div>`);
         }
         reviewOutput.innerHTML = html.join('');
       }
 
       async function exportReview(contentOverride = null) {
-        const content = contentOverride || buildReviewText((window.latestReviewResult || {}));
-        const defaultName = 'review-output.txt';
+        const latestReviewResult = window.latestReviewResult || null;
+        if (!contentOverride && !hasReviewResult(latestReviewResult)) {
+          reviewStatus.textContent = 'Run a review before exporting a text file.';
+          return;
+        }
+
+        const content = contentOverride || buildReviewText(latestReviewResult);
+        const defaultName = buildExportFileName();
 
         if ('showSaveFilePicker' in window) {
           try {
             const handle = await window.showSaveFilePicker({
               suggestedName: defaultName,
-              types: [{ description: 'Text files', accept: { 'text/plain': ['.txt', '.md'] } }],
+              types: [{ description: 'Text files', accept: { 'text/plain': ['.txt'] } }],
             });
             const writable = await handle.createWritable();
             await writable.write(content);
@@ -588,8 +834,12 @@
         const link = document.createElement('a');
         link.href = url;
         link.download = defaultName;
+        link.style.display = 'none';
+        document.body.appendChild(link);
         link.click();
+        link.remove();
         URL.revokeObjectURL(url);
+        reviewStatus.textContent = `Review exported to ${defaultName}`;
       }
 
       function saveCurrentTemplate() {
@@ -607,8 +857,10 @@
       document.getElementById('refreshBtn').addEventListener('click', refreshModels);
       document.getElementById('healthBtn').addEventListener('click', checkHealth);
       document.getElementById('reviewBtn').addEventListener('click', runReview);
+      document.getElementById('traceabilityBtn').addEventListener('click', runTraceabilityAnalysis);
       document.getElementById('exportBtn').addEventListener('click', () => exportReview());
-      document.getElementById('exportTextBtn').addEventListener('click', () => exportReview(buildReviewText(window.latestReviewResult || {})));
+      document.getElementById('exportTextBtn').addEventListener('click', () => exportReview());
+      document.getElementById('downloadReviewTextBtn').addEventListener('click', () => exportReview());
       document.getElementById('saveTemplateBtn').addEventListener('click', saveCurrentTemplate);
       addReferenceBtn.addEventListener('click', () => fileInput.click());
       removeReferenceBtn.addEventListener('click', removeSelectedReference);
