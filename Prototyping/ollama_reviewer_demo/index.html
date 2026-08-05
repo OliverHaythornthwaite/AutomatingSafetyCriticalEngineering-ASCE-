@@ -597,8 +597,8 @@
       }
 
       async function runReview() {
-        reviewStatus.textContent = 'Reviewing…';
-        reviewOutput.textContent = 'Generating review...';
+        reviewStatus.textContent = 'Reviewing with high effort. Large local models can take several minutes...';
+        reviewOutput.textContent = 'Generating complete-document review...';
         try {
           const payload = buildReviewPayload();
           const data = await fetchJson('/api/reviewer/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -685,7 +685,11 @@
 
       function buildReviewText(reviewResult) {
         const sections = (reviewResult?.sections || []).map((section) => `## ${section.title}\n${normalizeIndentedIssues(section.content || '')}`).join('\n\n');
-        const comments = (reviewResult?.atomic_comments || []).map((comment) => `- ${comment.id}: ${comment.issue}\n  Location: ${stripPageFromLocation(comment.location || 'Not specified')}\n  ${comment.comment}\n  Suggested resolution: ${comment.suggested_resolution || 'N/A'}`).join('\n\n');
+        const comments = (reviewResult?.atomic_comments || []).map((comment) => {
+          const rule = comment.violated_rule || 'Not found in provided reference material';
+          const ruleEvidence = comment.rule_evidence ? `\n  Rule evidence: ${comment.rule_evidence}` : '';
+          return `- ${comment.id}: ${comment.issue}\n  Location: ${stripPageFromLocation(comment.location || 'Not specified')}\n  Rule violated: ${rule}${ruleEvidence}\n  ${comment.comment}\n  Suggested resolution: ${comment.suggested_resolution || 'N/A'}`;
+        }).join('\n\n');
         return [
           `Summary\n${reviewResult?.summary || 'No summary available.'}`,
           sections || 'No sectional review output available.',
@@ -736,12 +740,51 @@
           parts.push(`<div class="review-section-content">${escapeHtml(parsed.intro)}</div>`);
         }
         parsed.issues.forEach((issue) => {
-          parts.push(`<pre class="review-issue-block">${escapeHtml(issue)}</pre>`);
+          parts.push(renderFindingBlock(issue));
         });
         if (!parts.length) {
           parts.push('<div class="review-section-content">No content.</div>');
         }
         return parts.join('');
+      }
+
+      function parseIssueFields(block) {
+        const fields = {};
+        String(block || '').split(/\r?\n/).forEach((line) => {
+          const match = line.trim().match(/^(Location|Rule violated|Rule evidence|Issue|Evidence|Target fix):\s*(.*)$/i);
+          if (match) {
+            const key = match[1].toLowerCase().replace(/\s+/g, '_');
+            fields[key] = fields[key] ? `${fields[key]} ${match[2].trim()}` : match[2].trim();
+          } else if (line.trim() && fields.evidence) {
+            fields.evidence += ` ${line.trim()}`;
+          }
+        });
+        return fields;
+      }
+
+      function renderFindingBlock(block) {
+        const fields = parseIssueFields(block);
+        if (!fields.issue && !fields.location) {
+          return `<pre class="review-issue-block">${escapeHtml(block)}</pre>`;
+        }
+        return renderFindingCard(fields);
+      }
+
+      function renderFindingCard(fields) {
+        return `
+          <article class="finding-card">
+            <div class="finding-card-head">
+              <strong>${escapeHtml(fields.issue || 'Issue')}</strong>
+              <span class="finding-location">${escapeHtml(stripPageFromLocation(fields.location || 'Not specified'))}</span>
+            </div>
+            <div class="finding-meta">
+              <span><b>Rules</b> ${escapeHtml(fields.rule_violated || 'Not specified')}</span>
+              ${fields.rule_evidence ? `<span><b>Rule basis</b> ${escapeHtml(fields.rule_evidence)}</span>` : ''}
+            </div>
+            ${fields.evidence ? `<p class="finding-evidence">${escapeHtml(fields.evidence.replace(/^Evidence:\s*/i, ''))}</p>` : ''}
+            ${fields.target_fix ? `<div class="finding-fix"><b>Fix</b> ${escapeHtml(fields.target_fix)}</div>` : ''}
+          </article>
+        `;
       }
 
       function escapeHtml(value) {
@@ -791,10 +834,20 @@
         const html = [];
         html.push(`<div class="small" style="margin-bottom:0.6rem;"><strong>Summary:</strong> ${escapeHtml(reviewResult?.summary || 'No summary available.')}</div>`);
         sections.forEach((section) => {
-          html.push(`<div class="review-section-box"><strong>${escapeHtml(section.title)}</strong>${renderSectionContent(section.content || 'No content.')}</div>`);
+          html.push(`<section class="review-section-box"><h3>${escapeHtml(section.title)}</h3>${renderSectionContent(section.content || 'No content.')}</section>`);
         });
         if (comments.length) {
-          html.push(`<div class="review-section-box"><strong>Atomic comments</strong><ul class="atomic-comment-list">${comments.map((comment) => `<li><strong>${escapeHtml(comment.id)}</strong> ${escapeHtml(comment.issue)}<br><em>Location:</em> ${escapeHtml(stripPageFromLocation(comment.location || 'Not specified'))}<br>${escapeHtml(comment.comment)}<br><em>Suggested resolution:</em> ${escapeHtml(comment.suggested_resolution || 'N/A')}</li>`).join('')}</ul></div>`);
+          html.push(`<section class="review-section-box atomic-comments-box"><h3>Atomic comments</h3><div class="atomic-comment-list">${comments.map((comment) => {
+            const rule = comment.violated_rule || 'Not found in provided reference material';
+            return renderFindingCard({
+              issue: `${comment.id}: ${comment.issue}`,
+              location: comment.location || 'Not specified',
+              rule_violated: rule,
+              rule_evidence: comment.rule_evidence || '',
+              evidence: comment.comment || 'N/A',
+              target_fix: comment.suggested_resolution || 'N/A',
+            });
+          }).join('')}</div></section>`);
         }
         reviewOutput.innerHTML = html.join('');
       }

@@ -18,9 +18,16 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 REQUEST_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_REQUEST_TIMEOUT", "12"))
 OLLAMA_LOAD_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_LOAD_TIMEOUT", "120"))
 OLLAMA_READY_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_READY_TIMEOUT", "45"))
-OLLAMA_REVIEW_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_REVIEW_TIMEOUT", "240"))
+OLLAMA_REVIEW_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_REVIEW_TIMEOUT", "900"))
 OLLAMA_STOP_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_STOP_TIMEOUT", "30"))
 MODEL_KEEP_ALIVE = os.environ.get("OLLAMA_MODEL_KEEP_ALIVE", "10m")
+OLLAMA_REVIEW_MIN_NUM_CTX = int(os.environ.get("OLLAMA_REVIEW_MIN_NUM_CTX", "8192"))
+OLLAMA_REVIEW_MAX_NUM_CTX = int(os.environ.get("OLLAMA_REVIEW_MAX_NUM_CTX", "32768"))
+OLLAMA_REVIEW_NUM_PREDICT = int(os.environ.get("OLLAMA_REVIEW_NUM_PREDICT", "8192"))
+OLLAMA_REVIEW_TEMPERATURE = float(os.environ.get("OLLAMA_REVIEW_TEMPERATURE", "0"))
+OLLAMA_REVIEW_TOP_P = float(os.environ.get("OLLAMA_REVIEW_TOP_P", "0.9"))
+OLLAMA_REVIEW_REPEAT_PENALTY = float(os.environ.get("OLLAMA_REVIEW_REPEAT_PENALTY", "1.05"))
+APPROX_CHARS_PER_TOKEN = 4
 WORD_EXTENSIONS = {".docx", ".docm", ".dotx", ".dotm"}
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 LEGACY_OFFICE_EXTENSIONS = {".doc", ".xls"}
@@ -31,6 +38,213 @@ TEXT_SOURCE_EXTENSIONS = {
     ".s", ".asm",
 }
 ARTEFACT_ORDER = {"SRATS": 0, "SR": 0, "HLR": 1, "LLR": 2, "LLRV": 3}
+DEMO_MODEL_NAME = "ChatGPT 5.6 SOL"
+DEMO_REVIEW_FINDINGS = [
+    {
+        "section": "Critical findings",
+        "id": "C-01",
+        "issue": "Command guards are bypassed.",
+        "evidence": "LLR-C2-001 excludes link, authority and vehicle mode; LLR-C2-010 permits transmission with lost link; LLR-C2-013 calls transport directly. Model lines 61-63/85 and C lines 81-83 transmit without the required guards.",
+        "rules": "SDS-C2-001, SDS-HMI-004, SDS-PRN-002/003, SIS-IMP-003",
+        "fix": "Align HLR/LLR command-guard requirements to SRAT-C2-002 and SRAT-C2-004: commands shall be inhibited when authority is invalid and transmission shall be prevented when link is lost. Remove the SRATS/HLR permissive exception wording unless it is approved as a separate derived safety requirement, then add HLR/LLR negative verification cases for invalid authority, lost link, invalid mode, invalid command kind and invalid parameters.",
+    },
+    {
+        "section": "Critical findings",
+        "id": "C-02",
+        "issue": "One confirmation can cause multiple transmissions.",
+        "evidence": "C line 53 sends during confirmation, then lines 95-99 send again in the same step. It continues sending every cycle while S_SENT. The model has equivalent level-sensitive behaviour at line 63.",
+        "rules": "SDS-C2-002, SMS-STM-005",
+        "fix": "Align HLR/LLR confirmation behaviour to SRAT-C2-006, whose acceptance criterion records one confirmation action. State that one valid confirmation produces at most one send request; a held confirmation control shall not cause repeated transmission. If retries are required, add a distinct SRATS/HLR requirement with bounded retry conditions and verification.",
+    },
+    {
+        "section": "Critical findings",
+        "id": "C-03",
+        "issue": "Acknowledgements are not correlated to the pending transaction.",
+        "evidence": "ack_id is unused in model lines 70-71 and discarded in C lines 58-65. Any positive acknowledgement produces ACCEPTED.",
+        "rules": "SDS-C2-003, SDS-PRN-006",
+        "fix": "Refine SRAT-C2-003 and SRAT-C2-008 through the HLR/LLR so accepted/rejected status is based on an acknowledgement whose transaction identifier matches the pending command. Update SRAT-C2-008 acceptance criteria beyond 'identifier is numeric' to require correlation, then add HLR/LLR cases for stale, missing, malformed and wrong-ID acknowledgements.",
+    },
+    {
+        "section": "Critical findings",
+        "id": "C-04",
+        "issue": "Warm restore can immediately transmit an invalid command.",
+        "evidence": "LLR-C2-007, model lines 43-53 and C lines 29-33 restore S_SENT. On the first step, C lines 95-99 send an empty command with transaction ID zero.",
+        "rules": "SIS-IMP-004, SMS-STM-002, SMS-TIM-004, SDS-PRN-005",
+        "fix": "Keep the HLR/LLR restart behaviour aligned with SRAT-C2-005: restore only the pending command selection so the operator can continue without re-entry; do not restore or resume transmission. Add HLR/LLR wording that after restart a fresh valid confirmation and guard check are required before any send request.",
+    },
+    {
+        "section": "Critical findings",
+        "id": "C-05",
+        "issue": "Transaction ID lifecycle is invalid.",
+        "evidence": "Zero is emitted for a new command and the ID increments only after acceptance. Multiple commands can consequently use the same ID.",
+        "rules": "SIS T_CommandId, SIS-DAT-003, SDS-C2-002",
+        "fix": "Clarify SRAT-C2-008 in the HLR/LLR: zero may be represented only as the startup/no-command identifier and shall not be emitted for a transmitted command. Require each transmitted command to carry a unique non-zero pending transaction identifier, with first-use, rejection, timeout and wraparound behaviour defined and verified.",
+    },
+    {
+        "section": "Critical findings",
+        "id": "C-06",
+        "issue": "Unknown or corrupt values produce unsafe valid behaviour.",
+        "evidence": "LLR-C2-012 converts an unknown command to RETURN_HOME, while model line 51 and C lines 111-114 convert an invalid state to ACCEPTED/GREEN.",
+        "rules": "SMS-DF-005, SMS-STM-004, SDS-PRN-005/006",
+        "fix": "Add HLR/LLR invalid-data behaviour that supports SRAT-C2-002, SRAT-C2-004 and SRAT-C2-003 failure conditions: unknown or corrupt command/state values shall inhibit transmission, prevent accepted status, and produce a defined operator-visible rejected/error indication. Do not map unknown values to valid commands or accepted states.",
+    },
+    {
+        "section": "Critical findings",
+        "id": "C-07",
+        "issue": "Memory and pointer safety rules are violated.",
+        "evidence": "C line 42 uses unbounded strcpy; line 50 allocates heap memory after initialization; line 51 dereferences it without checking allocation success. Input/output pointers are also dereferenced without validation. Static analysis reports a possible-null dereference at line 51.",
+        "rules": "SIS-IMP-006, SIS-C-002, SIS-C-003",
+        "fix": "Do not add C-pointer mechanics to the HLR. Instead, add HLR/LLR allocation text tying the PAN-C2 cyclic command path to DAL B deterministic behaviour in the SRATS header, then allocate detailed memory, bounded string and null-interface constraints to LLR/SIS verification while preserving trace to the affected SRATS failure conditions.",
+    },
+    {
+        "section": "Critical findings",
+        "id": "C-08",
+        "issue": "A production test bypass is executable.",
+        "evidence": "debug_force_send is part of the production operator and C step, with a production display button bound to it. It bypasses all command guards.",
+        "rules": "SMS-CLS-001/002, SDS-HMI-004, SIS-GEN-006",
+        "fix": "Add an HLR/LLR constraint aligned to SRAT-C2-002, SRAT-C2-004 and SRAT-C2-006 that no production control or interface may bypass authority, link or confirmation requirements. If maintenance/test functions are needed, record them outside the operational SRATS baseline or as separately approved non-production derived requirements.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-01",
+        "issue": "Selection expiry is wrong and incomplete.",
+        "evidence": "The SDS requires five seconds and cancellation on authority, mode, link or parameter change. The LLR/model use 200 x 50 ms = ten seconds and omit these cancellation conditions.",
+        "rules": "SDS-C2-001, SDS-IF-003",
+        "fix": "Update SRAT-C2-006/HLR/LLR consistency for destructive-command confirmation and selection arming: if the SDS requires five seconds, correct the HLR/LLR timeout and add cancellation on authority, link, mode, selected-command or parameter change. If this is not already represented in the SRATS, add or update the SRATS acceptance criterion before changing lower-level requirements.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-02",
+        "issue": "Timing is not deterministically implemented.",
+        "evidence": "The C implementation ignores dt, decrements once per invocation, and calls time(NULL). Missed/repeated tick behaviour and exact boundary semantics are undefined; the model timer is not saturating.",
+        "rules": "SIS-IMP-005, SMS-TIM-001/002/003",
+        "fix": "Make SRAT-C2-001 and SRAT-C2-003 timing verifiable in the HLR/LLR: replace 'promptly' and implicit timing with measurable seconds/application-cycle limits, start/stop events and boundary behaviour. Keep clock-source and saturation mechanics in the LLR/SIS, with tests linked back to the SRATS rows.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-03",
+        "issue": "Command conversion is uncontrolled.",
+        "evidence": "LLR-C2-015, model line 77 and C lines 51/98/119 convert real/double to int16_t without units, accepted range, rounding, saturation or overflow handling.",
+        "rules": "SIS-IMP-007, SIS-DAT-001, SMS-DF-002/004",
+        "fix": "Extend the HLR/LLR interface assumptions consistently with the SRATS failure conditions for unintended command and incorrect acknowledgement association: define command parameter units, ranges, resolution and invalid-value response. Keep conversion algorithms in LLR/SIS, but require out-of-range values to inhibit transmission or be rejected.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-04",
+        "issue": "The interface contract is incomplete.",
+        "evidence": "The LLR omits units, resolution, update rate, latency, source, age, validity, initialization and failure behaviour. Raw integers are used for link, authority, mode and command kind. Several model inputs are absent from the C header.",
+        "rules": "SDS-IF-001, SIS-DAT-001/004, SMS-DF-002",
+        "fix": "Update the HLR/LLR interface tables to support the SRATS rows directly: link state for SRAT-C2-004, authority for SRAT-C2-002, acknowledgement/transaction ID for SRAT-C2-003/008, and display outputs for SRAT-C2-007. Define typed value domains, validity, initialization, failure response, update rate and latency/freshness for each HLR-visible signal.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-05",
+        "issue": "Validity is encoded as a numeric sentinel.",
+        "evidence": "LLR-C2-002 treats both -1 and 0 as connected, rather than carrying validity separately.",
+        "rules": "SIS-DAT-002, SDS-PRN-006",
+        "fix": "Align link validity handling with SRAT-C2-004. Revise the HLR/LLR so link value and link validity are separate, and invalid or unavailable link data shall be treated as not usable for transmission and shall drive LINK LOST or another defined degraded/error presentation rather than connected.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-06",
+        "issue": "Generated code is explicitly permitted to be hand-edited.",
+        "evidence": "This appears in LLR-C2-014, model line 97 and the C source banner. Model or configuration defects must instead be corrected at source.",
+        "rules": "SIS-GEN-002",
+        "fix": "Keep lifecycle/code-generation controls outside the SRATS behavioural rows but trace them to the DAL B/provisional assurance context in the SRATS header and applicable standards. HLR/LLR changes should require corrections through approved requirements and model/configuration source, not manual generated-code edits.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-07",
+        "issue": "Traceability and approval controls are inadequate.",
+        "evidence": "The LLR is unapproved, LLR-C2-013-016 have no parent or planned verification, and all requirements trace only to the top-level operator.",
+        "rules": "SIS-IMP-001, SMS-CLS-002, SDS-TRC-001/002/003",
+        "fix": "Bring HLR/LLR trace into agreement with the SRATS Traceability sheet: allocate SRAT-C2-004 to an HLR, correct the obsolete HLR-C2-404 link for SRAT-C2-008, remove or formally create the orphan SRAT-C2-999 for HLR-C2-009, and ensure every HLR/LLR has planned verification rather than unapproved or review-only status.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-08",
+        "issue": "State transition priority is determined by diagram placement.",
+        "evidence": "Simultaneous acknowledgement and timeout resolution depends on visual ordering instead of an explicit requirement-derived priority. Invalid input and unexpected enum handling are incomplete.",
+        "rules": "SMS-STM-003/004, SDS-PRN-006",
+        "fix": "Add HLR/LLR priority rules that preserve the SRATS safety intent: authority inhibition and lost-link prevention from SRAT-C2-002/004 take precedence over send/accepted behaviour, while acknowledgement and timeout handling remain consistent with SRAT-C2-003. Add verification cases for simultaneous events.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-09",
+        "issue": "Status meaning is carried by colour alone.",
+        "evidence": "ACCEPTED is green and everything else red, with empty status text and no icon or alternative cue.",
+        "rules": "SIS-IMP-008, SDS-HMI-002",
+        "fix": "Align with SRAT-C2-007 without over-claiming it: retain the required green/red colour indication, but add a derived HLR/HMI requirement or update SRAT-C2-007 to include non-colour cues for accepted, rejected, pending, timeout and error states. Add inspection criteria beyond 'correct colour displayed'.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-10",
+        "issue": "The model violates naming and decomposition rules.",
+        "evidence": "DCDS_C2_Temp, N_DoStuff, data1, flag, flag2 and temp are non-domain names. The operator has 15 inputs and 9 outputs without an approved decomposition justification.",
+        "rules": "SMS-NAM-001/003",
+        "fix": "Use the SRATS Traceability sheet to drive decomposition: HLR/LLR responsibilities should map separately to command response, authority inhibition, acknowledgement, lost link, restart, destructive confirmation, status display and transaction identity. Leave internal naming corrections to model/LLR standards, but require traceable model elements rather than a single catch-all N_DoStuff allocation.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-11",
+        "issue": "Several LLR behaviours are absent or inconsistent in the stubs.",
+        "evidence": "Link-state mapping, ABORT second-confirmation behaviour, unknown-command handling and reset colour retention are not implemented. parameter_changed is ignored and absent from the C interface.",
+        "rules": "SIS-IMP-001/002, SDS-TRC-001",
+        "fix": "Clarify HLR/LLR behaviours using the existing SRATS anchors: link-state mapping to SRAT-C2-004, ABORT/RETURN HOME confirmation to SRAT-C2-006, restart selection continuity to SRAT-C2-005, status presentation to SRAT-C2-007, and transaction handling to SRAT-C2-008. Add planned verification rows for each rather than relying on passing unrelated tests.",
+    },
+    {
+        "section": "Major findings",
+        "id": "M-12",
+        "issue": "Requirements and dataflow are not sufficiently verifiable.",
+        "evidence": "\"Quickly enough to look immediate\" has no measurable limit. The model uses data2 * 0; the C source stores but never uses g_confirm_level; multiple input fields are never consumed.",
+        "rules": "SDS-PRN-001, SDS-IF-003, SIS-IMP-002, SMS-DF-001",
+        "fix": "Revise SRAT-C2-001 and its linked HLR/LLR so 'promptly' and 'reasonably quickly' become measurable response limits with acceptance criteria. For each HLR-visible input, either link it to an existing SRATS behaviour and verification case or add an approved derived SRATS/HLR requirement before implementation.",
+    },
+]
+DEMO_RULE_EVIDENCE = {
+    "C-01": "The governing command rules require transmission to be inhibited unless authority is valid and the command link is usable; SRAT-C2-002 covers authority inhibition and SRAT-C2-004 requires transmission prevention when link is lost.",
+    "C-02": "The destructive-command allocation records one confirmation action, and the state-machine rules require event-triggered transitions rather than repeated level-sensitive sends from a held control.",
+    "C-03": "The acknowledgement and transaction-identity rules require accepted/rejected status to be associated with the command transaction being acknowledged, not with any unrelated positive acknowledgement.",
+    "C-04": "The restart allocation restores a pending command selection for operator continuity; it does not authorize immediate transmission or restoration of an unsafe sending state after restart.",
+    "C-05": "The transaction-identity allocation permits zero only as the startup/no-prior-identifier condition; transmitted commands require a numeric identifier suitable for request/acknowledgement correlation.",
+    "C-06": "The dataflow and state-machine rules require invalid or unknown values to be handled explicitly and safely, preserving authority/link/acknowledgement safety intent rather than mapping corrupt values to valid accepted behaviour.",
+    "C-07": "The implementation standards require deterministic resource use, bounded data handling and defensive handling of invalid interfaces for DAL B allocated software.",
+    "C-08": "The configuration, HMI and generated-code rules require production behaviour to preserve command guards and exclude unapproved debug or test bypasses from the operational baseline.",
+    "M-01": "The command and interface rules require a bounded selection window and cancellation when relevant authority, link, mode, command or parameter context changes.",
+    "M-02": "The implementation and timing rules require deterministic timing with measurable limits, defined start/expiry events and verifiable boundary behaviour.",
+    "M-03": "The data and implementation rules require command parameters to have defined units, ranges, scaling and invalid-value responses before conversion or transmission.",
+    "M-04": "The interface/data rules require each HLR-visible signal to have a defined type/domain, validity, initialization, rate, freshness and failure response.",
+    "M-05": "The data rules require validity to be represented separately from the signal value so unavailable or invalid link data cannot be interpreted as connected.",
+    "M-06": "The generated-code lifecycle rule requires production generated behaviour to be changed through approved source artefacts and regeneration, not by manual code edits.",
+    "M-07": "The traceability and approval rules require each HLR/LLR to have a valid parent allocation, planned verification and approved lifecycle status.",
+    "M-08": "The state-machine rules require simultaneous events and invalid enum/input handling to have explicit requirement-derived priority and safe outcomes.",
+    "M-09": "The HMI rules require status meaning to remain distinguishable and verifiable, not solely dependent on colour recognition.",
+    "M-10": "The modelling rules require domain-meaningful naming and decomposition that supports reviewable trace from SRATS rows to HLR/LLR responsibilities and model elements.",
+    "M-11": "The implementation and traceability rules require allocated HLR behaviours to be consistently carried into LLR, model, interface and verification artefacts.",
+    "M-12": "The precision, interface and dataflow rules require measurable requirements and traceable use or removal of every HLR-visible data item.",
+}
+DEMO_FINDING_LOCATIONS = {
+    "C-01": "HLR-C2-001/002/010; LLR-C2-001/010/013; model 61-63,85; C 81-83",
+    "C-02": "HLR-C2-005; model 63; C 53,95-99",
+    "C-03": "HLR-C2-004; LLR ack handling; model 70-71; C 58-65",
+    "C-04": "HLR-C2-007; LLR-C2-007; model 43-53; C 29-33,95-99",
+    "C-05": "HLR-C2-011; SRAT-C2-008; transaction ID lifecycle",
+    "C-06": "HLR-C2-012; LLR-C2-012; model 51; C 111-114",
+    "C-07": "dcds_c2_stub.c lines 42,50-51; step I/O dereferences",
+    "C-08": "debug_force_send interface; production HMI button; C step",
+    "M-01": "HLR-C2-003; LLR/model selection timer",
+    "M-02": "HLR-C2-008; C timing path; model timer",
+    "M-03": "LLR-C2-015; model 77; C 51,98,119",
+    "M-04": "HLR section 4 external interface assumptions; LLR/model/C interface",
+    "M-05": "HLR section 4 i_CommandLink; LLR-C2-002",
+    "M-06": "LLR-C2-014; model note 97; C source banner",
+    "M-07": "HLR allocation table; SRATS Traceability rows 9,13-14; LLR-C2-013-016",
+    "M-08": "state transition model; simultaneous ack/timeout handling",
+    "M-09": "HLR-C2-006; SRAT-C2-007; status display",
+    "M-10": "model naming/decomposition: DCDS_C2_Temp, N_DoStuff, data1/flag/temp",
+    "M-11": "HLR/LLR behavioural stubs; parameter_changed interface",
+    "M-12": "HLR-C2-008; model data2 * 0; C g_confirm_level",
+}
 REQUIREMENT_ID_PATTERN = re.compile(
     r"\b(?:"
     r"DCDS-[A-Z0-9]+-(?:SRATS|SR|HLR|LLR|LLRV)-\d+[A-Z]?"
@@ -104,6 +318,16 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
         model_name = self._extract_model_name(body)
         if not model_name:
             return {"error": "Please provide a model name."}
+        if self._is_demo_model(model_name):
+            return {
+                "ok": True,
+                "model": DEMO_MODEL_NAME,
+                "status": "ready",
+                "ready": True,
+                "note": "Demo model is ready.",
+                "reason": "Demo model is ready.",
+                "latency_seconds": 0,
+            }
 
         response = self._request_ollama("/api/ps")
         if isinstance(response, dict) and response.get("error"):
@@ -138,6 +362,8 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
         model_name = self._extract_model_name(body)
         if not model_name:
             return {"error": "Please provide a model name."}
+        if self._is_demo_model(model_name):
+            return {"ok": True, "model": DEMO_MODEL_NAME, "status": "not-running", "note": "Demo model does not run in Ollama."}
 
         response = self._request_ollama("/api/ps")
         if isinstance(response, dict) and response.get("error"):
@@ -160,6 +386,16 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
         model_name = self._extract_model_name(body)
         if not model_name:
             return {"error": "Please provide a model name."}
+        if self._is_demo_model(model_name):
+            return {
+                "ok": True,
+                "model": DEMO_MODEL_NAME,
+                "status": "ready",
+                "ready": True,
+                "note": "Demo model is ready.",
+                "reason": "Demo model is ready.",
+                "latency_seconds": 0,
+            }
 
         installed_response = self._request_ollama("/api/tags")
         if isinstance(installed_response, dict) and installed_response.get("error"):
@@ -209,7 +445,23 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
                 name = model.get("name") or model.get("model") or "unknown"
                 result.append({"name": name, "status": "online"})
 
+        if not any(model.get("name") == DEMO_MODEL_NAME for model in result):
+            result.insert(0, self._demo_model_status())
+
         return {"models": result}
+
+    def _is_demo_model(self, model_name):
+        return str(model_name or "").strip().lower() == DEMO_MODEL_NAME.lower()
+
+    def _demo_model_status(self):
+        return {
+            "name": DEMO_MODEL_NAME,
+            "status": "online",
+            "size": None,
+            "modified_at": None,
+            "digest": "demo-canned-review",
+            "family": "demo",
+        }
 
     def _build_reviewer_response(self, body):
         if not isinstance(body, dict):
@@ -223,6 +475,9 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
         d0178c_context = (body.get("d0178c_context") or "").strip()
         reference_locations = body.get("reference_locations") or []
         reference_document_entries = body.get("reference_documents") or []
+
+        if self._is_demo_model(model):
+            return self._build_demo_reviewer_response()
 
         if documents:
             target_documents, document_errors = self._extract_uploaded_documents(documents, "document")
@@ -249,10 +504,9 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
 
         target_chunks = self._chunk_documents(target_documents, "TARGET")
         reference_chunks = self._chunk_documents(reference_documents, "REFERENCE")
-        retrieved_target = self._retrieve_relevant_chunks(target_chunks, skills_prompt, review_goal)
-        retrieved_reference = self._retrieve_relevant_chunks(reference_chunks, skills_prompt, review_goal)
-        target_context_text = "\n\n".join(retrieved_target[:8]) if retrieved_target else "No target document excerpts were available."
-        reference_context_text = "\n\n".join(retrieved_reference[:6]) if retrieved_reference else "No reference material was provided."
+        target_context_text = self._build_complete_target_context(target_chunks)
+        retrieved_reference = self._retrieve_relevant_chunks(reference_chunks, skills_prompt, review_goal, target_context_text)
+        reference_context_text = "\n\n".join(retrieved_reference[:8]) if retrieved_reference else "No reference material was provided."
 
         prompt_length = len(skills_prompt) + len(review_goal) + len(target_context_text) + len(reference_context_text)
         user_prompt = self._build_review_prompt(skills_prompt, review_goal, target_context_text, reference_context_text)
@@ -262,7 +516,7 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are an experienced engineering reviewer. Be precise, practical, evidence-based, and apply common-sense engineering judgment to the full artefact and its context.",
+                    "content": "You are an experienced engineering reviewer. Use the highest available reasoning effort for this review. Be precise, practical, evidence-based, and apply common-sense engineering judgment to the full artefact and its context.",
                 },
                 {
                     "role": "user",
@@ -271,6 +525,8 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             ],
             "stream": False,
             "format": "json",
+            "options": self._build_review_model_options(prompt_length),
+            "keep_alive": MODEL_KEEP_ALIVE,
         }
 
         response = self._request_ollama("/api/chat", ollama_payload, timeout=OLLAMA_REVIEW_TIMEOUT_SECONDS)
@@ -279,17 +535,25 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             return {
                 "error": diagnostic_reason,
                 "review": "",
-                "retrieved_chunks": retrieved_target[:6] + retrieved_reference[:6],
+                "retrieved_chunks": target_chunks[:6] + retrieved_reference[:6],
                 "model": model,
                 "source_count": source_count,
             }
 
-        review_text = response.get("message", {}).get("content", "") if isinstance(response, dict) else ""
+        review_text, extraction_error = self._extract_review_text(response)
+        if extraction_error:
+            return {
+                "error": extraction_error,
+                "review": "",
+                "retrieved_chunks": target_chunks[:6] + retrieved_reference[:6],
+                "model": model,
+                "source_count": source_count,
+            }
         review_result = self._parse_review_result(review_text)
         return {
             "review": review_result.get("summary") or review_text.strip(),
             "review_result": review_result,
-            "retrieved_chunks": retrieved_target[:6] + retrieved_reference[:6],
+            "retrieved_chunks": target_chunks[:6] + retrieved_reference[:6],
             "model": model,
             "source_count": source_count,
         }
@@ -523,16 +787,23 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
     def _build_review_prompt(self, skills_prompt, review_goal, target_context_text, reference_context_text):
         return (
             "You are reviewing only the TARGET document(s) for a safety-critical engineering workflow. "
+            "Use the highest review effort available to the selected model: deliberate carefully, cross-check target statements against supplied references, and verify each proposed finding before reporting it. "
+            "Perform a complete review of the entire supplied TARGET content, not only the most obviously relevant excerpts. "
+            "Read all TARGET chunks in document order before deciding that no issue exists in a review area. "
             "REFERENCE material is supplied only as supporting context, standards guidance, or comparison evidence. "
             "Do not critique the REFERENCE material and do not suggest edits to reference documents. "
             "Only raise an issue when it applies to the TARGET document or when the TARGET document conflicts with, omits, or fails to satisfy the REFERENCE material. "
             "Every atomic comment must be framed as a change to the TARGET document. "
+            "For every finding, explicitly identify the governing rule, standard objective, requirement, checklist item, or reference statement violated by the TARGET. "
+            "Use the exact rule identifier/title when one is present in the REFERENCE excerpts, and include the REFERENCE document, section, and paragraph/row label that supplied it. "
+            "Rule violated must contain the rule identifier(s) or title(s). Rule evidence must be different: summarise the actual obligation imposed by those rules and why it governs this finding, rather than repeating the same identifier list. "
+            "If no governing rule is available in the supplied REFERENCE material, write 'Rule violated: Not found in provided reference material' and frame the finding as needing rule/evidence confirmation. "
             "For every issue mentioned in any review section above the atomic comment list, identify the precise TARGET location using the exact document, section, and paragraph/row labels provided in the TARGET excerpts. "
             "Do not invent, estimate, or report page numbers. Page identifiers are not reliable in extracted Office/text content, so omit page numbers entirely from every Location field. "
             "Write each issue as an indented block beginning with two spaces and a location prefix, such as '  Location: document filename.docx, section Verification Evidence, paragraph 12 - ...' or '  Location: document interfaces.xlsx, section Worksheet: Interfaces, row 8 - ...'. "
-            "Indent continuation lines under that issue by four spaces, using '    Issue:', '    Evidence:', and '    Target fix:' where useful. "
+            "Indent continuation lines under that issue by four spaces, using '    Rule violated:', '    Rule evidence:', '    Issue:', '    Evidence:', and '    Target fix:'. "
             "Separate every issue block with one blank line. Do not put details for multiple issues under the same Location, Issue, Evidence, or Target fix fields. "
-            "Repeat the Location, Issue, Evidence, and Target fix fields for each distinct issue, even when two issues occur in the same document section. "
+            "Repeat the Location, Rule violated, Rule evidence, Issue, Evidence, and Target fix fields for each distinct issue, even when two issues occur in the same document section. "
             "Every issue block in a review section must be replicated as a separate entry in atomic_comments at the bottom so it can be copied easily. "
             "For LLR, low-level requirement, interface, signal, data item, API, message, port, or parameter issues, first check the target and reference excerpts for an interface table, interface definition table, data dictionary, signal list, API definition, ICD, or similar definition source. "
             "Do not raise an interface-related issue until you have compared the requirement against that definition source. "
@@ -544,25 +815,83 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             "If a review area is not applicable, say so briefly rather than inventing an answer.\n\n"
             f"Skills prompt:\n{skills_prompt or 'Review for clarity, traceability, hazards, and omissions.'}\n\n"
             f"Review goal:\n{review_goal}\n\n"
-            f"TARGET document excerpts to review:\n{target_context_text}\n\n"
+            f"Complete TARGET document content to review:\n{target_context_text}\n\n"
             f"REFERENCE material for context only:\n{reference_context_text}\n\n"
             "Scope rule: if a problem appears only in REFERENCE material, do not report it as a review finding. "
-            "Use REFERENCE material to judge the TARGET document, not as a document under review.\n\n"
+            "Use REFERENCE material to judge the TARGET document, not as a document under review. "
+            "A finding is incomplete unless it links the TARGET evidence to the actual rule or reference requirement being violated.\n\n"
             "Return a JSON object with the following shape and no extra commentary:\n"
             "{\n"
             "  \"summary\": \"Short overall assessment\",\n"
             "  \"sections\": [\n"
-            "    {\"title\": \"Visual review\", \"content\": \"For each distinct issue use a separate indented block: Location, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the reviewed target excerpts.\"},\n"
-            "    {\"title\": \"Spelling and grammar\", \"content\": \"For each distinct issue use a separate indented block: Location, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the reviewed target excerpts.\"},\n"
-            "    {\"title\": \"Process review\", \"content\": \"For each distinct issue use a separate indented block: Location, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the reviewed target excerpts.\"},\n"
-            "    {\"title\": \"Traceability review\", \"content\": \"For each distinct issue use a separate indented block: Location, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the reviewed target excerpts.\"},\n"
-            "    {\"title\": \"Additional observations\", \"content\": \"For each distinct issue use a separate indented block: Location, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the reviewed target excerpts.\"}\n"
+            "    {\"title\": \"Visual review\", \"content\": \"For each distinct issue use a separate indented block: Location, Rule violated, Rule evidence, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the complete reviewed target content.\"},\n"
+            "    {\"title\": \"Spelling and grammar\", \"content\": \"For each distinct issue use a separate indented block: Location, Rule violated, Rule evidence, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the complete reviewed target content.\"},\n"
+            "    {\"title\": \"Process review\", \"content\": \"For each distinct issue use a separate indented block: Location, Rule violated, Rule evidence, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the complete reviewed target content.\"},\n"
+            "    {\"title\": \"Traceability review\", \"content\": \"For each distinct issue use a separate indented block: Location, Rule violated, Rule evidence, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the complete reviewed target content.\"},\n"
+            "    {\"title\": \"Additional observations\", \"content\": \"For each distinct issue use a separate indented block: Location, Rule violated, Rule evidence, Issue, Evidence, Target fix. Put one blank line between issue blocks. If no issue exists, state that no issue was found in the complete reviewed target content.\"}\n"
             "  ],\n"
             "  \"atomic_comments\": [\n"
-            "    {\"id\": \"A1\", \"location\": \"document DOCUMENT, section SECTION, paragraph/row LABEL\", \"issue\": \"Short target-document issue description\", \"comment\": \"Atomic comment to resolve in the TARGET document\", \"suggested_resolution\": \"How to fix the TARGET document\"}\n"
+            "    {\"id\": \"A1\", \"location\": \"document DOCUMENT, section SECTION, paragraph/row LABEL\", \"violated_rule\": \"REFERENCE document, section SECTION, paragraph/row LABEL - exact rule id/title or Not found in provided reference material\", \"rule_evidence\": \"Short quote or paraphrase of the governing rule\", \"issue\": \"Short target-document issue description\", \"comment\": \"Atomic comment to resolve in the TARGET document\", \"suggested_resolution\": \"How to fix the TARGET document\"}\n"
             "  ]\n"
             "}"
         )
+
+    def _build_demo_reviewer_response(self):
+        review_result = self._build_demo_review_result()
+        return {
+            "review": review_result["summary"],
+            "review_result": review_result,
+            "retrieved_chunks": [],
+            "model": DEMO_MODEL_NAME,
+            "source_count": 0,
+        }
+
+    def _build_demo_review_result(self):
+        sections = []
+        atomic_comments = []
+        for section_name in ("Critical findings", "Major findings"):
+            findings = [finding for finding in DEMO_REVIEW_FINDINGS if finding["section"] == section_name]
+            sections.append(
+                {
+                    "title": section_name,
+                    "content": "\n\n".join(self._format_demo_issue_block(finding) for finding in findings),
+                }
+            )
+            for finding in findings:
+                atomic_comments.append(self._build_demo_atomic_comment(finding))
+
+        return {
+            "summary": "Demo review completed: 8 critical findings and 12 major findings were identified.",
+            "sections": sections,
+            "atomic_comments": atomic_comments,
+        }
+
+    def _format_demo_issue_block(self, finding):
+        return (
+            f"Location: {self._demo_location_for_finding(finding)}\n"
+            f"    Rule violated: {finding['rules']}\n"
+            f"    Rule evidence: {self._demo_rule_evidence_for_finding(finding)}\n"
+            f"    Issue: {finding['issue']}\n"
+            f"    Evidence: {finding['evidence']}\n"
+            f"    Target fix: {finding['fix']}"
+        )
+
+    def _build_demo_atomic_comment(self, finding):
+        return {
+            "id": finding["id"],
+            "location": self._demo_location_for_finding(finding),
+            "violated_rule": finding["rules"],
+            "rule_evidence": self._demo_rule_evidence_for_finding(finding),
+            "issue": finding["issue"],
+            "comment": finding["evidence"],
+            "suggested_resolution": finding["fix"],
+        }
+
+    def _demo_rule_evidence_for_finding(self, finding):
+        return DEMO_RULE_EVIDENCE.get(finding["id"], "The cited rules define the governing obligation violated by the target evidence.")
+
+    def _demo_location_for_finding(self, finding):
+        return DEMO_FINDING_LOCATIONS.get(finding["id"], f"{finding['section']} {finding['id']}")
 
     def _parse_review_result(self, review_text):
         if not review_text:
@@ -606,6 +935,14 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             {
                 "id": comment.get("id") or f"A{index + 1}",
                 "location": self._normalize_location_label(comment.get("location") or ""),
+                "violated_rule": self._normalize_rule_label(
+                    comment.get("violated_rule")
+                    or comment.get("rule_violated")
+                    or comment.get("applicable_rule")
+                    or comment.get("rule")
+                    or ""
+                ),
+                "rule_evidence": comment.get("rule_evidence") or comment.get("rule_reference") or "",
                 "issue": comment.get("issue") or "Issue",
                 "comment": comment.get("comment") or "",
                 "suggested_resolution": comment.get("suggested_resolution") or "",
@@ -620,6 +957,26 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             "sections": normalized_sections,
             "atomic_comments": normalized_comments,
         }
+
+    def _extract_review_text(self, response):
+        if not isinstance(response, dict):
+            return "", "Ollama returned an unexpected review response."
+
+        message = response.get("message") or {}
+        content = message.get("content") or ""
+        if content.strip():
+            return content, ""
+
+        thinking = message.get("thinking") or response.get("thinking") or ""
+        if thinking.strip():
+            done_reason = response.get("done_reason") or "unknown"
+            return (
+                "",
+                "The selected model responded only with internal reasoning and did not produce the final JSON review. "
+                f"Ollama ended with reason '{done_reason}'. Increase OLLAMA_REVIEW_NUM_PREDICT, use a faster/non-reasoning model, or reduce the complete review batch size.",
+            )
+
+        return "", "The selected model returned an empty review response."
 
     def _ensure_atomic_comments_cover_section_issues(self, sections, atomic_comments):
         comments = list(atomic_comments)
@@ -637,6 +994,8 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
                     {
                         "id": f"A{len(comments) + 1}",
                         "location": issue["location"],
+                        "violated_rule": issue["violated_rule"],
+                        "rule_evidence": issue["rule_evidence"],
                         "issue": issue["issue"],
                         "comment": issue["comment"],
                         "suggested_resolution": issue["suggested_resolution"],
@@ -671,7 +1030,25 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             if location_match:
                 location_text = location_match.group(1).strip()
 
-        evidence_lines = [line for line in lines[1:] if not re.match(r"(?i)target fix:|suggested resolution:", line)]
+        rule_lines = [
+            re.sub(r"(?i)^(rule violated|violated rule|applicable rule|rule):\s*", "", line).strip()
+            for line in lines[1:]
+            if re.match(r"(?i)rule violated:|violated rule:|applicable rule:|rule:", line)
+        ]
+        rule_evidence_lines = [
+            re.sub(r"(?i)^(rule evidence|reference evidence|rule text):\s*", "", line).strip()
+            for line in lines[1:]
+            if re.match(r"(?i)rule evidence:|reference evidence:|rule text:", line)
+        ]
+        issue_lines = [
+            re.sub(r"(?i)^issue:\s*", "", line).strip()
+            for line in lines[1:]
+            if re.match(r"(?i)issue:", line)
+        ]
+        evidence_lines = [
+            line for line in lines[1:]
+            if not re.match(r"(?i)target fix:|suggested resolution:|rule violated:|violated rule:|applicable rule:|rule:|rule evidence:|reference evidence:|rule text:|issue:", line)
+        ]
         fix_lines = [
             re.sub(r"(?i)^(target fix|suggested resolution):\s*", "", line).strip()
             for line in lines[1:]
@@ -680,7 +1057,9 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
 
         return {
             "location": self._normalize_location_label(location_text),
-            "issue": issue_text,
+            "violated_rule": self._normalize_rule_label(" ".join(rule_lines)),
+            "rule_evidence": " ".join(rule_evidence_lines).strip(),
+            "issue": " ".join(issue_lines).strip() or issue_text,
             "comment": " ".join(evidence_lines).strip() or block,
             "suggested_resolution": " ".join(fix_lines).strip() or "Update the target document to resolve this issue.",
         }
@@ -703,6 +1082,7 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
         text = re.sub(r"\s+", " ", (location or "").strip())
         if not text:
             return ""
+        text = self._replace_repeated_document_section(text)
         text = re.sub(r"(?i)\bpage\s+(?:not available in source|\d+(?:\s*\([^)]*\))?)\s*,?\s*", "", text)
         text = re.sub(r"(?i)\|\s*page\s+(?:not available in source|\d+(?:\s*\([^)]*\))?)\s*\|?", "|", text)
         text = re.sub(r"\s*\|\s*", " | ", text)
@@ -710,11 +1090,31 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
         text = re.sub(r"\s+,", ",", text)
         return text.strip(" ,-")
 
+    def _replace_repeated_document_section(self, text):
+        document_match = re.match(r"(?i)^\s*(?:TARGET|REFERENCE)?\s*:?\s*(?:document\s+)?([^|,]+?)(?:\s*\|\s*|,\s*)section\s+", text)
+        if not document_match:
+            return text
+        document_name = document_match.group(1).strip().lower()
+
+        def replace_match(match):
+            repeated_name = match.group(1).strip().lower()
+            if repeated_name == document_name:
+                return "section not resolved"
+            return match.group(0)
+
+        return re.sub(r"(?i)section\s+Document\s+([^|,]+)", replace_match, text, count=1)
+
+    def _normalize_rule_label(self, rule):
+        text = self._normalize_location_label(rule)
+        if not text:
+            return "Not found in provided reference material"
+        return text
+
     def _diagnose_prompt_failure(self, error_message, model, prompt_length, source_count):
         lowered = error_message.lower()
         if "timed out" in lowered or "timeout" in lowered:
             if prompt_length > 22000:
-                return f"The prompt likely exceeded the response budget. The documentation is large ({source_count} source chunk(s)); try a shorter excerpt or a smaller model."
+                return f"The prompt likely exceeded the response budget for a complete-document review. The documentation is large ({source_count} source document(s)); try a model with a larger context window or split the material into smaller complete review batches."
             return f"The prompt timed out while Ollama was generating a response for {model}. The model may still be loading, or the request may be too heavy for the current setup."
         if "unable to reach" in lowered or "connection" in lowered:
             return f"The portal could not reach Ollama at {OLLAMA_BASE_URL}. Check the Ollama service and ensure it is listening on the expected port."
@@ -1010,7 +1410,7 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             content = (document.get("content") or "").strip()
             if not content:
                 continue
-            current_section = f"Document {name}"
+            current_section = ""
             explicit_pages = re.split(r"\f+", content)
             paragraph_counter = 0
 
@@ -1024,7 +1424,7 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
                     if self._looks_like_section_heading(paragraph):
                         current_section = paragraph
 
-                    section_label = current_section or f"Document {name}"
+                    section_label = current_section or "not resolved"
                     detail_label = self._location_detail_label(paragraph, paragraph_counter)
                     location = f"{role_label}: {name} | section {section_label} | {detail_label}"
                     if len(paragraph) > 1800:
@@ -1057,8 +1457,29 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
             return f"row {row_match.group(1)}"
         return f"paragraph {paragraph_counter}"
 
-    def _retrieve_relevant_chunks(self, chunks, skills_prompt, review_goal):
-        query = " ".join([skills_prompt, review_goal]).lower()
+    def _build_complete_target_context(self, target_chunks):
+        if not target_chunks:
+            return "No target document content was available."
+        return "\n\n".join(target_chunks)
+
+    def _build_review_model_options(self, prompt_length=0):
+        requested_context = self._estimate_review_context_tokens(prompt_length)
+        return {
+            "temperature": OLLAMA_REVIEW_TEMPERATURE,
+            "top_p": OLLAMA_REVIEW_TOP_P,
+            "repeat_penalty": OLLAMA_REVIEW_REPEAT_PENALTY,
+            "num_ctx": requested_context,
+            "num_predict": OLLAMA_REVIEW_NUM_PREDICT,
+        }
+
+    def _estimate_review_context_tokens(self, prompt_length):
+        prompt_tokens = max(1, int(prompt_length / APPROX_CHARS_PER_TOKEN))
+        needed_tokens = prompt_tokens + OLLAMA_REVIEW_NUM_PREDICT + 1024
+        rounded_tokens = ((needed_tokens + 2047) // 2048) * 2048
+        return max(OLLAMA_REVIEW_MIN_NUM_CTX, min(OLLAMA_REVIEW_MAX_NUM_CTX, rounded_tokens))
+
+    def _retrieve_relevant_chunks(self, chunks, skills_prompt, review_goal, comparison_text=""):
+        query = " ".join([skills_prompt, review_goal, comparison_text]).lower()
         query_terms = set(re.findall(r"[a-zA-Z0-9_]+", query))
         scored = []
         for chunk in chunks:
@@ -1068,10 +1489,14 @@ class OllamaDemoHandler(BaseHTTPRequestHandler):
                 if len(term) < 3:
                     continue
                 score += chunk_lower.count(term)
+            if re.search(r"\b(rule|shall|must|required|objective|standard|compliance|criterion|criteria)\b", chunk_lower):
+                score += 2
+            if re.search(r"\b[A-Z]{2,10}[-_ ]?\d+(?:[.\-_]\d+)*[A-Z]?\b", chunk):
+                score += 2
             scored.append((score, chunk))
         scored.sort(key=lambda item: item[0], reverse=True)
         ranked = [chunk for _, chunk in scored if chunk]
-        return ranked[:6] if ranked else chunks[:3]
+        return ranked[:8] if ranked else chunks[:3]
 
     def _extract_model_name(self, body):
         if isinstance(body, dict):
