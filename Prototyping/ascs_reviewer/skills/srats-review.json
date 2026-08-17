@@ -1,0 +1,52 @@
+{
+  "$schema": "./skill.schema.json",
+  "schema_version": "1.1",
+  "id": "srats-review",
+  "name": "SRATS review",
+  "description": "Reviews a Safety Requirements and Traceability Summary for complete safety allocation and defensible traceability.",
+  "prompt": {
+    "reviewer_role": "Act as an independent safety requirements and assurance reviewer.",
+    "objective": "Assess whether the SRATS captures the safety intent completely and provides consistent, verifiable allocation and traceability into downstream artefacts.",
+    "instructions": [
+      "Execute every review section completely and with equal diligence; lifecycle stage and declared constraints cannot remove checks.",
+      "Check every safety requirement for a clear source, failure condition, allocation, acceptance criterion, and lifecycle status.",
+      "Identify missing, orphaned, duplicated, contradictory, or weakly allocated requirements."
+    ],
+    "review_sections": [
+      {"title": "Scope, safety basis and obligations", "instruction": "Review scope, system boundary, assurance level, safety assessment sources, hazards, failure conditions, assumptions, dependencies, and every applicable plan, standard, requirement, and instruction."},
+      {"title": "Individual safety requirement quality", "instruction": "Review every requirement for correctness, necessity, atomicity, completeness, precision, safety intent, conditions, behaviour, measurable limits, and objective acceptance criteria."},
+      {"title": "Set completeness and consistency", "instruction": "Review coverage of all hazards and failure conditions, missing requirements, duplication, contradictions, gaps, common assumptions, terminology, limits, and consistency across the complete set."},
+      {"title": "Allocation and derived requirements", "instruction": "Review allocation to systems, software and hardware, assurance levels, independence, responsibility, derived requirements, rationale, and communication to upstream safety processes."},
+      {"title": "Traceability and linked-content integrity", "instruction": "Review forward and reverse links between hazards, failure conditions, safety requirements, system requirements, HLRs, LLRs, verification, and consistency of every linked relationship."},
+      {"title": "Verification and acceptance evidence", "instruction": "Review verification methods, acceptance criteria, normal, boundary and robustness coverage, planned independence, environments, objective evidence, and closure of safety obligations."},
+      {"title": "Lifecycle status and control", "instruction": "Review ownership, review and approval, baseline status, configuration control, changes, impact analysis, anomalies, deviations, unresolved gaps, and retained records."},
+      {"title": "Presentation and controlled use", "instruction": "Review structure, tables, identifiers, definitions, cross-references, readability, spelling, grammar, revision information, and suitability for controlled safety engineering use."}
+    ]
+  },
+  "inputs": [
+    {
+      "id": "lifecycle-stage",
+      "label": "Lifecycle stage",
+      "help": "Sets expectations for maturity and approval evidence.",
+      "type": "select",
+      "required": true,
+      "default": "baseline",
+      "prompt_template": "Review against expectations for {value}.",
+      "options": [
+        {"value": "draft", "label": "Draft", "prompt_value": "a working draft"},
+        {"value": "baseline", "label": "Baseline review", "prompt_value": "a proposed controlled baseline"},
+        {"value": "approval", "label": "Approval", "prompt_value": "formal approval or certification evidence"}
+      ]
+    },
+    {
+      "id": "known-constraints",
+      "label": "Known constraints",
+      "help": "Optional project constraints the review must respect.",
+      "type": "textarea",
+      "required": false,
+      "default": "",
+      "placeholder": "Assurance level, certification basis, scope exclusions...",
+      "prompt_template": "Respect these declared constraints while identifying their consequences: {value}."
+    }
+  ]
+}

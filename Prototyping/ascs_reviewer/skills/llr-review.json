@@ -1,0 +1,53 @@
+{
+  "$schema": "./skill.schema.json",
+  "schema_version": "1.1",
+  "id": "llr-review",
+  "name": "Low-level requirements review",
+  "description": "Reviews low-level requirements for deterministic, implementable, traceable, and verifiable design detail.",
+  "prompt": {
+    "reviewer_role": "Act as an independent low-level software requirements and design reviewer.",
+    "objective": "Assess whether the LLR set defines deterministic and implementable behaviour that completely refines the HLR while remaining objectively verifiable.",
+    "instructions": [
+      "Execute every review section completely and with equal diligence; implementation context may add constraints but cannot remove checks.",
+      "Check algorithms, states, dataflow, interfaces, boundaries, timing, initialization, resource constraints, and defensive behaviour.",
+      "Compare interface claims with supplied interface definitions before reporting a defect."
+    ],
+    "review_sections": [
+      {"title": "Scope, source and applicable obligations", "instruction": "Review scope, assumptions, assurance allocation, parent HLRs, architecture constraints, and consistency with every supplied plan, standard, requirement, and instruction."},
+      {"title": "Individual requirement quality", "instruction": "Review every LLR for correctness, necessity, atomicity, clarity, completeness, consistency, deterministic meaning, feasible implementation, and objective verifiability."},
+      {"title": "Deterministic behaviour and algorithms", "instruction": "Review algorithms, calculations, sequencing, preconditions, outputs, limits, precision, overflow, underflow, rounding, boundary conditions, and implementation completeness."},
+      {"title": "Dataflow and interfaces", "instruction": "Review types, units, ranges, scaling, validity, initialization, freshness, conversions, and interface failure behaviour."},
+      {"title": "State and timing", "instruction": "Review states, transitions, event priority, timers, scheduling assumptions, boundary semantics, and recovery."},
+      {"title": "Defensive behaviour, safety and resources", "instruction": "Review invalid inputs, corrupt states, failures, degraded modes, recovery, safe defaults, safety mechanisms, concurrency, memory, stack, execution time, and deterministic resource use."},
+      {"title": "Set completeness and internal consistency", "instruction": "Review the complete LLR set for missing cases, duplication, conflicts, unreachable behaviour, incomplete mode coverage, incompatible assumptions, and consistency with architecture and interfaces."},
+      {"title": "Traceability and verification", "instruction": "Review complete HLR allocation, bidirectional links, derived content, orphan content, measurable acceptance criteria, planned methods, normal, boundary and robustness coverage, and missing evidence."},
+      {"title": "Lifecycle and presentation control", "instruction": "Review naming, decomposition, identifiers, ownership, status, baselines, changes, approvals, anomalies, cross-references, readability, spelling, grammar, and controlled use."}
+    ]
+  },
+  "inputs": [
+    {
+      "id": "implementation-context",
+      "label": "Implementation context",
+      "help": "Select the closest implementation style.",
+      "type": "select",
+      "required": true,
+      "default": "mixed",
+      "prompt_template": "Assume {value}.",
+      "options": [
+        {"value": "hand-code", "label": "Hand-written code", "prompt_value": "implementation by hand-written source code"},
+        {"value": "model", "label": "Model-based", "prompt_value": "model-based design and generated code"},
+        {"value": "mixed", "label": "Mixed", "prompt_value": "a mixed model-based and hand-written implementation"}
+      ]
+    },
+    {
+      "id": "implementation-constraints",
+      "label": "Implementation constraints",
+      "help": "Optional language, platform, modelling, or resource constraints.",
+      "type": "textarea",
+      "required": false,
+      "default": "",
+      "placeholder": "Language subset, target processor, cycle time, memory limits...",
+      "prompt_template": "Judge the requirements against these implementation constraints: {value}."
+    }
+  ]
+}

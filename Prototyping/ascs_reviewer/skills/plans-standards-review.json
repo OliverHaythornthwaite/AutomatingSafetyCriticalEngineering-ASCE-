@@ -1,0 +1,56 @@
+{
+  "$schema": "./skill.schema.json",
+  "schema_version": "1.1",
+  "id": "plans-standards-review",
+  "name": "Plans and standards review",
+  "description": "Reviews lifecycle plans and standards for usable controls, clear responsibilities, and consistent assurance evidence.",
+  "prompt": {
+    "reviewer_role": "Act as an independent software assurance, planning, and standards reviewer.",
+    "objective": "Assess whether the target plans or standards define a complete, consistent, practicable, and auditable lifecycle framework for safety-critical engineering.",
+    "instructions": [
+      "Execute every review section completely and with equal diligence; document context may add checks but cannot remove any.",
+      "Check that responsibilities, entry and exit criteria, controls, records, approvals, deviations, and interfaces between processes are explicit.",
+      "Identify conflicting rules, missing enforcement mechanisms, unverifiable language, and gaps between plans and standards."
+    ],
+    "review_sections": [
+      {"title": "Scope, applicability and compliance basis", "instruction": "Review purpose, scope, lifecycle boundaries, applicability, exclusions, assumptions, assurance level, certification basis, contractual obligations, and relationships to other plans and standards."},
+      {"title": "Objectives, commitments and completeness", "instruction": "Review every objective, commitment, requirement, rule, and instruction for completeness, correctness, necessity, clarity, consistency, feasibility, and objective confirmation."},
+      {"title": "Governance, authority and independence", "instruction": "Review organisations, roles, responsibilities, authority, competence, independence, approvals, escalation, communication, interfaces, and accountability."},
+      {"title": "Lifecycle activities and transition criteria", "instruction": "Review all processes, activities, inputs, outputs, dependencies, sequencing, entry criteria, exit criteria, reviews, approvals, and transition controls."},
+      {"title": "Engineering standards, methods and enforcement", "instruction": "Review mandatory rules, methods, constraints, conventions, tailoring, waivers, deviations, exceptions, enforcement, compliance checking, and practical usability."},
+      {"title": "Safety assurance and development assurance", "instruction": "Review safety objectives, assurance-level obligations, derived requirements, independence, error prevention and detection, assumptions, failure response, and assurance evidence."},
+      {"title": "Verification, validation and coverage", "instruction": "Review verification and validation activities, methods, independence, coverage criteria, expected results, pass criteria, robustness, structural coverage, reviews, analyses, tests, and closure evidence."},
+      {"title": "Configuration, change and problem control", "instruction": "Review identification, baselines, versioning, change impact, status accounting, archives, release control, problem reports, anomalies, deviations, corrective action, and closure."},
+      {"title": "Tools, environments, data and external parties", "instruction": "Review tool selection and qualification, environments, data control, reusable components, suppliers, subcontractors, interfaces, access, security, and retention obligations."},
+      {"title": "Traceability, records and auditability", "instruction": "Review bidirectional traceability, required records, evidence ownership, review records, approvals, retention, reproducibility, audit access, compliance matrices, and certification liaison."},
+      {"title": "Cross-document consistency", "instruction": "Cross-check terminology, responsibilities, activities, inputs, outputs, criteria, schedules, standards, references, tailoring, and commitments across every supplied plan and standard."},
+      {"title": "Presentation and controlled use", "instruction": "Review structure, identifiers, definitions, terminology, cross-references, tables, readability, spelling, grammar, revision history, approval state, and suitability for controlled use."}
+    ]
+  },
+  "inputs": [
+    {
+      "id": "document-kind",
+      "label": "Document kind",
+      "help": "Choose the closest type so the review applies the right expectations.",
+      "type": "select",
+      "required": true,
+      "default": "mixed",
+      "prompt_template": "Review as {value}.",
+      "options": [
+        {"value": "plan", "label": "Lifecycle plan", "prompt_value": "a lifecycle plan defining responsibilities and activities"},
+        {"value": "standard", "label": "Engineering standard", "prompt_value": "an engineering standard defining mandatory methods and constraints"},
+        {"value": "mixed", "label": "Combined set", "prompt_value": "a combined or cross-referenced set of plans and standards"}
+      ]
+    },
+    {
+      "id": "compliance-basis",
+      "label": "Compliance basis",
+      "help": "Optional standards, assurance level, or contractual framework.",
+      "type": "textarea",
+      "required": false,
+      "default": "",
+      "placeholder": "For example: DO-178C Level B with project-specific supplements",
+      "prompt_template": "Judge completeness against this declared compliance basis: {value}."
+    }
+  ]
+}

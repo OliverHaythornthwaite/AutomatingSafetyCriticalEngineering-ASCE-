@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skill.schema.json",
+  "title": "ASCS Reviewer skill",
+  "description": "Portable definition of a review workflow and the questions presented by the ASCS Reviewer UI.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "name", "description", "prompt", "inputs"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": "1.1"},
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "name": {"type": "string", "minLength": 1},
+    "description": {"type": "string", "minLength": 1},
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewer_role", "objective", "instructions", "review_sections"],
+      "properties": {
+        "reviewer_role": {"type": "string", "minLength": 1},
+        "objective": {"type": "string", "minLength": 1},
+        "instructions": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "review_sections": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title", "instruction"],
+            "properties": {
+              "title": {"type": "string", "minLength": 1},
+              "instruction": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "type", "prompt_template"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+          "label": {"type": "string", "minLength": 1},
+          "help": {"type": "string"},
+          "type": {"enum": ["text", "textarea", "select", "multiselect"]},
+          "required": {"type": "boolean", "default": false},
+          "default": {
+            "oneOf": [
+              {"type": "string"},
+              {"type": "array", "items": {"type": "string"}}
+            ]
+          },
+          "placeholder": {"type": "string"},
+          "prompt_template": {"type": "string", "pattern": "\\{value\\}"},
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["value", "label", "prompt_value"],
+              "properties": {
+                "value": {"type": "string", "minLength": 1},
+                "label": {"type": "string", "minLength": 1},
+                "prompt_value": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

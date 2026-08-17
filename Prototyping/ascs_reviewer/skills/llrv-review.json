@@ -1,0 +1,53 @@
+{
+  "$schema": "./skill.schema.json",
+  "schema_version": "1.1",
+  "id": "llrv-review",
+  "name": "Low-level verification review",
+  "description": "Reviews low-level verification artefacts for coverage, credible procedures, objective results, and traceable evidence.",
+  "prompt": {
+    "reviewer_role": "Act as an independent low-level verification and evidence reviewer.",
+    "objective": "Assess whether the verification artefact demonstrates complete, repeatable, and traceable satisfaction of the allocated low-level requirements.",
+    "instructions": [
+      "Execute every review section completely and with equal diligence; evidence state and environment only provide context and cannot remove checks.",
+      "Separate planned verification from executed evidence and identify missing objective results.",
+      "Check nominal, boundary, robustness, failure, state-transition, and timing coverage where applicable."
+    ],
+    "review_sections": [
+      {"title": "Scope and applicable obligations", "instruction": "Review verification scope, assumptions, assurance level, target configuration, applicable plans, standards, requirements, instructions, methods, environments, and claimed completion state."},
+      {"title": "Requirement and structural coverage", "instruction": "Review mapping from every LLR to verification cases and results, including normal, boundary, robustness, failure, state, timing, data coupling, control coupling, and required structural coverage."},
+      {"title": "Verification case completeness", "instruction": "Review every case for source requirement, purpose, preconditions, inputs, sequence, timing, expected behaviour, tolerances, pass criteria, postconditions, cleanup, and independence from the implementation."},
+      {"title": "Procedure repeatability and environment", "instruction": "Review setup, hardware, software, tools, versions, test data, instrumentation, calibration, initialization, execution steps, observability, repeatability, and environment representativeness."},
+      {"title": "Expected and actual results", "instruction": "Review objective expected results, recorded actual results, comparisons, tolerances, pass or fail decisions, raw evidence, timestamps, identities, and consistency with claimed status."},
+      {"title": "Robustness and failure coverage", "instruction": "Review invalid and out-of-range inputs, interface failures, degraded modes, state transitions, timing edges, resource limits, recovery, safe behaviour, and independence assumptions."},
+      {"title": "Anomalies and closure", "instruction": "Review failures, anomalies, problem reports, deviations, reruns, impact analysis, regression evidence, corrective actions, unresolved items, and justified closure."},
+      {"title": "Traceability, independence and lifecycle control", "instruction": "Review bidirectional traceability, complete coverage, independence, reviews, approvals, configuration control, baselines, change impact, retained evidence, and reproducibility."},
+      {"title": "Presentation and controlled use", "instruction": "Review organisation, identifiers, terminology, cross-references, tables, readability, spelling, grammar, revision status, approval state, and suitability as controlled evidence."}
+    ]
+  },
+  "inputs": [
+    {
+      "id": "evidence-state",
+      "label": "Evidence state",
+      "help": "Sets whether the artefact is judged as a plan or completed evidence.",
+      "type": "select",
+      "required": true,
+      "default": "executed",
+      "prompt_template": "Treat the artefact as {value}.",
+      "options": [
+        {"value": "planned", "label": "Planned", "prompt_value": "a planned verification specification"},
+        {"value": "partial", "label": "Partially executed", "prompt_value": "partially executed verification evidence"},
+        {"value": "executed", "label": "Executed", "prompt_value": "completed verification evidence"}
+      ]
+    },
+    {
+      "id": "verification-environment",
+      "label": "Verification environment",
+      "help": "Optional simulator, target, tool, or test environment context.",
+      "type": "textarea",
+      "required": false,
+      "default": "",
+      "placeholder": "Target hardware, simulator, tool qualification status...",
+      "prompt_template": "Account for this verification environment: {value}."
+    }
+  ]
+}

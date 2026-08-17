@@ -1,0 +1,39 @@
+{
+  "$schema": "./skill.schema.json",
+  "schema_version": "1.1",
+  "id": "hlr-review",
+  "name": "High-level requirements review",
+  "description": "Reviews high-level requirements for correct allocation, testability, completeness, and externally visible behaviour.",
+  "prompt": {
+    "reviewer_role": "Act as an independent high-level software requirements reviewer.",
+    "objective": "Assess whether the HLR set completely and unambiguously defines externally visible behaviour and correctly refines its allocated safety and system requirements.",
+    "instructions": [
+      "Execute every review section completely and with equal diligence; system context may add checks but cannot remove any.",
+      "Check each requirement for atomicity, measurable behaviour, preconditions, failure response, and verification feasibility.",
+      "Do not push implementation detail into the HLR unless it is externally required or safety significant."
+    ],
+    "review_sections": [
+      {"title": "Scope, source and applicability", "instruction": "Review scope, system boundary, assumptions, applicability, source obligations, parent allocation, intended assurance level, and consistency with every supplied plan, standard, and instruction."},
+      {"title": "Individual requirement quality", "instruction": "Review every requirement for correctness, necessity, atomicity, clarity, completeness, consistency, measurable limits, feasible implementation, and objective verifiability."},
+      {"title": "Set completeness and consistency", "instruction": "Review the complete set for missing behaviour, duplication, conflicts, gaps between modes, undefined terms, inconsistent limits, and incompatible assumptions."},
+      {"title": "Operational and failure behaviour", "instruction": "Review modes, preconditions, state behaviour, invalid inputs, degraded operation, recovery, and safe failure response."},
+      {"title": "Interfaces, data and timing", "instruction": "Review every externally visible interface, input, output, data domain, type, range, unit, scaling, validity, initialization, freshness, timing, ordering, dependency, and failure semantic."},
+      {"title": "Safety allocation and derived requirements", "instruction": "Review safety objectives, assurance allocation, failure-condition contribution, safety mechanisms, independence assumptions, derived requirements, and communication of derived content to upstream processes."},
+      {"title": "Traceability and allocation", "instruction": "Review valid parent allocation, downstream allocation, bidirectional links, coverage, orphan requirements, suspect links, and consistency between linked content."},
+      {"title": "Verification readiness", "instruction": "Review measurable acceptance criteria, verification methods, normal, boundary and robustness coverage, testability, independence, environments, and evidence needed to demonstrate compliance."},
+      {"title": "Lifecycle and presentation control", "instruction": "Review identifiers, organisation, status, ownership, baselines, changes, approvals, anomalies, cross-references, tables, readability, spelling, grammar, and controlled use."}
+    ]
+  },
+  "inputs": [
+    {
+      "id": "system-context",
+      "label": "System context",
+      "help": "Optional boundary or operating context not obvious from the artefact.",
+      "type": "textarea",
+      "required": false,
+      "default": "",
+      "placeholder": "System boundary, operating modes, external dependencies...",
+      "prompt_template": "Use this system context when judging completeness: {value}."
+    }
+  ]
+}

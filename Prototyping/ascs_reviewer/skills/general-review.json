@@ -1,0 +1,38 @@
+{
+  "$schema": "./skill.schema.json",
+  "schema_version": "1.1",
+  "id": "general-review",
+  "name": "General engineering review",
+  "description": "A complete safety-critical review for engineering artefacts that do not need a lifecycle-specific workflow.",
+  "prompt": {
+    "reviewer_role": "Act as an independent safety-critical engineering reviewer.",
+    "objective": "Assess every applicable aspect of the target artefact against supplied plans, standards, requirements, and instructions, including correctness, completeness, clarity, consistency, safety, traceability, verification evidence, and controlled engineering use.",
+    "instructions": [
+      "Execute every review section completely and with equal diligence; contextual inputs may add checks but cannot remove any.",
+      "Distinguish defects from observations and avoid unsupported assumptions.",
+      "Link every finding to precise target evidence and supplied reference obligations."
+    ],
+    "review_sections": [
+      {"title": "Scope and obligations", "instruction": "Review scope, applicability, assumptions, dependencies, intended use, and every applicable supplied plan, standard, requirement, and instruction."},
+      {"title": "Correctness, completeness and clarity", "instruction": "Review every statement for correctness, completeness, necessity, clarity, atomicity, unambiguity, consistency, and feasible implementation."},
+      {"title": "Safety, risk and failure behaviour", "instruction": "Review hazards, safety objectives, controls, assumptions, modes, invalid conditions, degraded behaviour, recovery, and safe failure response."},
+      {"title": "Interfaces and data", "instruction": "Review interface definitions, inputs, outputs, data types, ranges, units, validity, initialization, timing, dependencies, and failure semantics."},
+      {"title": "Lifecycle, governance and configuration", "instruction": "Review lifecycle status, responsibilities, independence, approvals, change control, deviations, anomalies, baselines, and required records."},
+      {"title": "Traceability and cross-document consistency", "instruction": "Review forward and reverse traceability, complete allocation, derived content, orphan content, duplication, conflicts, and cross-reference integrity."},
+      {"title": "Verification and objective evidence", "instruction": "Review acceptance criteria, verification methods, normal and robustness coverage, repeatability, objective evidence, tools, environments, and closure status."},
+      {"title": "Presentation and controlled use", "instruction": "Review structure, identifiers, terminology, tables, readability, spelling, grammar, revision information, and suitability for controlled engineering use."}
+    ]
+  },
+  "inputs": [
+    {
+      "id": "intended-use",
+      "label": "Intended use or decision",
+      "help": "Optional context about how the reviewed artefact will be used.",
+      "type": "textarea",
+      "required": false,
+      "default": "",
+      "placeholder": "For example: baseline approval before detailed design",
+      "prompt_template": "Judge fitness for this intended use: {value}."
+    }
+  ]
+}

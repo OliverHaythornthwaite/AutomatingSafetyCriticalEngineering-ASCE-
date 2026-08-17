@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ASCS Reviewer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="hero">
+        <h1>ASCS Reviewer</h1>
+        <p class="small">Local, structured review of safety-critical engineering artefacts using Ollama.</p>
+      </div>
+
+      <div class="grid">
+        <section class="panel">
+        <h2>1. Model access</h2>
+        <p class="section-intro">Connect to local Ollama models and confirm the selected engine is ready before running a review.</p>
+        <div class="row">
+          <button id="refreshBtn">Refresh models</button>
+          <button id="healthBtn" class="secondary">Check health</button>
+        </div>
+        <div id="healthStatus" class="status status-ready">Ready to review.</div>
+        <h3>Installed models</h3>
+        <div id="models" class="model-list">Loading available models…</div>
+      </section>
+
+      <section class="panel">
+        <h2>2. Review setup</h2>
+        <p class="section-intro">Choose a guided review skill or configure a custom review, then add the artefacts and supporting references.</p>
+        <label>Model
+          <select id="modelSelect"></select>
+        </label>
+
+        <fieldset class="mode-switch">
+          <legend>Review mode</legend>
+          <label><input id="skillModeRadio" type="radio" name="promptMode" value="skill" checked /> Guided skill</label>
+          <label><input id="customModeRadio" type="radio" name="promptMode" value="custom" /> Custom</label>
+        </fieldset>
+
+        <div id="skillModePanel">
+          <label>Review skill
+            <select id="skillSelect"></select>
+          </label>
+          <p id="skillDescription" class="field-help">Loading review skills...</p>
+          <div id="skillFields" class="skill-fields"></div>
+        </div>
+
+        <div id="customModePanel" hidden>
+          <p class="field-help">Build the review instruction from individual fields. The complete safety-critical checklist always runs; custom fields only add context or checks. Required fields are marked.</p>
+          <label>Reviewer role <span aria-hidden="true">*</span>
+            <textarea id="customReviewerRole" rows="2">Act as an independent safety-critical engineering reviewer.</textarea>
+          </label>
+          <label>Review objective <span aria-hidden="true">*</span>
+            <textarea id="customObjective" rows="3">Review every applicable aspect of the target artefact against the supplied plans, standards, requirements, and instructions.</textarea>
+          </label>
+          <label>Review method
+            <textarea id="customReviewMethod" rows="3" placeholder="For example: inspect every requirement and cross-check supplied references"></textarea>
+          </label>
+          <label>Additional checks
+            <textarea id="customAdditionalChecks" rows="3" placeholder="Optional project-specific checks to add to the complete baseline checklist"></textarea>
+          </label>
+        </div>
+
+        <details class="advanced-options">
+          <summary>Optional standards context</summary>
+          <label>Standards or project guidance
+            <textarea id="d0178cContext" rows="5" placeholder="Paste applicable standards guidance or project-specific review rules here..."></textarea>
+          </label>
+        </details>
+        <label>Reference document list
+          <div class="row" style="margin-top:0.25rem;">
+            <button id="addReferenceBtn" class="secondary" type="button">Add selected files</button>
+            <button id="removeReferenceBtn" class="secondary" type="button">Remove selected</button>
+          </div>
+          <select id="referenceList" class="reference-list" size="4"></select>
+          <input id="fileInput" type="file" multiple style="display:none;" />
+        </label>
+        <div id="documentStatus" class="muted">No reference documents have been added yet.</div>
+        <label>Documentation to review
+          <div class="row" style="margin-top:0.25rem;">
+            <button id="reviewModeToggleBtn" class="secondary" type="button">Switch to text entry</button>
+            <button id="addReviewDocBtn" class="secondary" type="button">Add selected files</button>
+            <button id="removeReviewDocBtn" class="secondary" type="button">Remove selected</button>
+          </div>
+          <div id="reviewDocFileMode">
+            <select id="reviewDocumentList" class="review-document-list" size="4"></select>
+            <input id="reviewFileInput" type="file" multiple style="display:none;" />
+          </div>
+          <div id="reviewDocTextMode" style="display:none;">
+            <textarea id="documentText" rows="8" placeholder="Paste design notes, process documentation, or requirements here..."></textarea>
+          </div>
+          <div id="reviewDocumentStatus" class="muted">No review documents have been added yet.</div>
+        </label>
+        <div class="row review-actions">
+          <button id="reviewBtn">Run review</button>
+          <button id="traceabilityBtn" class="secondary" type="button">Show traceability analysis</button>
+          <button id="saveConfigBtn" class="secondary" type="button">Save setup</button>
+        </div>
+        <div id="reviewStatus" class="status status-ready">Awaiting review request.</div>
+      </section>
+      </div>
+
+      <section class="panel review-panel">
+        <h2>3. Review output</h2>
+        <div class="row" style="margin-top:0.25rem;">
+          <button id="downloadReviewTextBtn" class="secondary" type="button">Download text file</button>
+        </div>
+        <div id="reviewOutput" class="status review-output review-output-ready">The structured review will appear here.</div>
+      </section>
+
+      <section id="traceabilityPanel" class="panel review-panel" style="display:none;">
+        <h2>4. Traceability analysis</h2>
+        <div class="row" style="margin-top:0.25rem;">
+          <button id="downloadTraceabilityBtn" class="secondary" type="button">Download analysis JSON</button>
+        </div>
+        <div id="traceabilityOutput" class="status review-output review-output-ready">Traceability analysis will appear here.</div>
+      </section>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
