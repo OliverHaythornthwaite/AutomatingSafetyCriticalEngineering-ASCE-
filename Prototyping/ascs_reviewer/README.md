@@ -1,11 +1,11 @@
 # ASCS Reviewer
 
-ASCS Reviewer is a local web application for structured review and traceability analysis of safety-critical engineering artefacts. It uses models installed in [Ollama](https://ollama.com/) and sends review content only to the configured Ollama endpoint.
+ASCS Reviewer is a local web application for structured review and traceability analysis of safety-critical engineering artefacts. Reviews can use models installed in [Ollama](https://ollama.com/) or an OpenAI-compatible model hosting server.
 
 ## Requirements
 
 - Python 3.10 or later
-- Ollama, with at least one local model installed
+- Ollama with at least one local model installed, or access to an OpenAI-compatible model server
 
 The application itself uses only the Python standard library.
 
@@ -55,6 +55,62 @@ To produce a skill:
 
 Custom mode does not require a skill file. It always applies a complete safety-critical baseline checklist and accepts separate reviewer-role, objective, review-method, and additional-check fields. Additional checks extend the baseline; they cannot narrow or replace it.
 
+## Supported documents
+
+The reviewer extracts modern Word (`.docx`, `.docm`, `.dotx`, `.dotm`) and Excel (`.xlsx`, `.xlsm`, `.xltx`, `.xltm`) content, with best-effort support for legacy `.doc` and `.xls` files. Plain-text and text-based data formats can also be reviewed directly.
+
+SCADE support includes:
+
+- Suite source and project files: `.scade`, `.xscade`, and `.etp`.
+- Display and graphical resources: `.sgfx`, `.pgfx`, `.ogfx`, `.dgfx`, `.sdfx`, and `.rgfx`.
+- Simulation and analysis text: `.sss`, `.in`, `.sns`, `.out`, and `.obs`.
+
+XML-based SCADE resources are flattened into an indented representation that preserves element hierarchy, attributes, and text. Text-based SCADE files retain their complete decoded content with a format and filename label.
+
+## Model providers
+
+Section 3 starts in **Local Ollama** mode. Select **Switch to hosted server** to configure an OpenAI-compatible endpoint such as vLLM, LM Studio, llama.cpp, or a managed service. Supply its base URL (normally ending in `/v1`), exact model identifier, and an optional bearer API key. **Check hosted server** queries `/models`; reviews and benchmarks use `/chat/completions`.
+
+The hosted URL and model identifier can be saved with the review setup. API keys are held only in the page for the current browser session and are never written to local storage. Use HTTPS whenever the model server is not on the same computer. Retrieval remains local: dense RAG queries use the configured Ollama embedding model when available and otherwise fall back to TF-IDF.
+
+The **Review context window** setting applies consistently to review retrieval and benchmarks. It offers 8K, 16K, 32K, 64K, and 128K, plus the model's exact maximum when it falls between those values, preferring 32K where supported. For Ollama, the reviewer reads the architecture context limit from `/api/show` and disables oversized choices. Ollama receives the valid selection as `num_ctx`; larger values require correspondingly more memory. For hosted providers, **Check hosted server** uses context metadata from `/models` when available. If the hosting API does not publish it, enter the server-configured maximum manually before reviewing. Oversized choices are then disabled in the same way.
+
+## Retrieval knowledge (RAG)
+
+The Retrieval knowledge panel can build a temporary local TF-IDF vector index from any supported document or load a portable JSON vector store. Retrieval runs before the review model is called, preserves chunk provenance, and fills only the context space remaining after the complete target artefact and review instructions. The focused, broad, and maximum settings select up to 12, 24, or 40 relevant chunks respectively.
+
+Portable stores use this structure:
+
+```json
+{
+  "name": "Project assurance knowledge",
+  "embedding_model": "project-embedding-model",
+  "dimensions": 3,
+  "chunks": [
+    {
+      "id": "standard-4.2",
+      "source": "software-standard.md",
+      "content": "The governing rule or evidence text.",
+      "embedding": [0.01, -0.02, 0.03]
+    }
+  ]
+}
+```
+
+`embedding` is optional. Stores without embeddings and documents indexed through the UI use local TF-IDF cosine ranking. When embeddings, dimensions, and an `embedding_model` are present, the server asks the local Ollama embedding model for the query vector and combines dense cosine similarity with TF-IDF ranking. If embedding generation is unavailable, retrieval falls back to TF-IDF rather than blocking the review. Loaded knowledge remains in memory and is cleared when the server stops or when **Clear knowledge** is selected.
+
+## Repeatable model benchmark
+
+Each installed Ollama model has a **Test** action, and hosted mode provides **Test hosted model**. Benchmark version 1.0 reviews the same six simulated low-level requirements against four explicit benchmark rules. Four requirements contain one seeded defect each; two are clean controls. Local models are warmed up before timing; every provider receives deterministic generation settings where supported: temperature `0`, seed `42`, and a JSON response contract.
+
+The quality score is independent of machine speed:
+
+- 85% comes from the F1 score for exact requirement/rule finding pairs.
+- 15% comes from correctly passing the two clean controls without findings.
+- Missed seeded defects reduce recall; invented or misattributed findings reduce precision.
+
+The UI reports score, precision, recall, clean-control accuracy, warm-up time, and measured review time. Timing is shown separately and does not alter the quality score. Results remain in the browser for the current page session.
+
 ## Traceability analysis
 
 Traceability analysis runs locally and deterministically; it does not require a model. It extracts requirement definitions from the supplied artefacts and analyses explicit requirement-ID references across the supported lifecycle order: `SRATS`, `SR`, `HLR`, `LLR`, and `LLRV`.
@@ -83,7 +139,12 @@ Configuration is supplied through environment variables:
 | `OLLAMA_LOAD_TIMEOUT` | `120` | Model loading timeout in seconds |
 | `OLLAMA_READY_TIMEOUT` | `45` | Model readiness timeout in seconds |
 | `OLLAMA_REVIEW_TIMEOUT` | `900` | Review timeout in seconds |
+| `OLLAMA_BENCHMARK_TIMEOUT` | `180` | Repeatable model benchmark timeout in seconds |
 | `OLLAMA_MODEL_KEEP_ALIVE` | `10m` | Ollama model retention period |
+| `OLLAMA_REVIEW_MIN_NUM_CTX` | `8192` | Minimum accepted review context window |
+| `OLLAMA_REVIEW_DEFAULT_NUM_CTX` | `32768` | Default context for API clients that omit the UI setting |
+| `OLLAMA_REVIEW_MAX_NUM_CTX` | `131072` | Maximum selectable review context window |
+| `OLLAMA_REVIEW_NUM_PREDICT` | `8192` | Maximum generated review tokens |
 
 To expose the web application to other machines, explicitly set `ASCS_REVIEWER_HOST=0.0.0.0`. Do this only on a trusted network; the server has no authentication or TLS.
 

@@ -27,6 +27,29 @@ const removeReviewDocBtn = document.getElementById('removeReviewDocBtn');
 const reviewModeToggleBtn = document.getElementById('reviewModeToggleBtn');
 const reviewDocFileMode = document.getElementById('reviewDocFileMode');
 const reviewDocTextMode = document.getElementById('reviewDocTextMode');
+const ragStoreInput = document.getElementById('ragStoreInput');
+const ragDocumentsInput = document.getElementById('ragDocumentsInput');
+const ragStatus = document.getElementById('ragStatus');
+const ragEnabled = document.getElementById('ragEnabled');
+const ragScope = document.getElementById('ragScope');
+const benchmarkStatus = document.getElementById('benchmarkStatus');
+const benchmarkResultsBody = document.getElementById('benchmarkResults');
+const providerModeBtn = document.getElementById('providerModeBtn');
+const providerModeLabel = document.getElementById('providerModeLabel');
+const ollamaAccessPanel = document.getElementById('ollamaAccessPanel');
+const hostedAccessPanel = document.getElementById('hostedAccessPanel');
+const hostedBaseUrl = document.getElementById('hostedBaseUrl');
+const hostedModel = document.getElementById('hostedModel');
+const hostedApiKey = document.getElementById('hostedApiKey');
+const hostedHealthBtn = document.getElementById('hostedHealthBtn');
+const hostedBenchmarkBtn = document.getElementById('hostedBenchmarkBtn');
+const hostedStatus = document.getElementById('hostedStatus');
+const ollamaModelSelection = document.getElementById('ollamaModelSelection');
+const hostedModelSelection = document.getElementById('hostedModelSelection');
+const hostedModelSummary = document.getElementById('hostedModelSummary');
+const contextWindow = document.getElementById('contextWindow');
+const contextWindowStatus = document.getElementById('contextWindowStatus');
+const hostedContextLimit = document.getElementById('hostedContextLimit');
 const CONFIG_STORAGE_KEY = 'ascs-reviewer-config';
 const reviewDocuments = [];
 const referenceEntries = [];
@@ -37,6 +60,11 @@ let promptMode = 'skill';
 let preferredModelName = '';
 let preferredSkillId = 'general-review';
 let renderedSkillId = '';
+let modelAccessMode = 'ollama';
+let hostedDetectedModelName = '';
+let preferredContextWindow = 32768;
+const benchmarkResults = new Map();
+const REQUIRED_SERVER_CAPABILITIES = ['context-window-v1', 'model-context-discovery-v1', 'hosted-model-v1', 'model-benchmark-v1', 'rag-store-v1'];
 
 function readConfig() {
   try {
@@ -61,6 +89,13 @@ function saveConfig() {
     d0178cContext: document.getElementById('d0178cContext').value,
     reviewDocumentText: document.getElementById('documentText').value,
     reviewInputMode,
+    ragEnabled: ragEnabled.checked,
+    ragScope: ragScope.value,
+    modelAccessMode,
+    hostedBaseUrl: hostedBaseUrl.value.trim(),
+    hostedModel: hostedModel.value.trim(),
+    contextWindow: contextWindow.value,
+    hostedContextLimit: hostedContextLimit.value,
   };
   localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
   reviewStatus.textContent = 'Configuration saved.';
@@ -82,6 +117,31 @@ function applyConfig(config) {
   if (typeof config.selectedModel === 'string') {
     preferredModelName = config.selectedModel;
   }
+  if (typeof config.hostedBaseUrl === 'string' && config.hostedBaseUrl.trim()) {
+    hostedBaseUrl.value = config.hostedBaseUrl.trim();
+  }
+  if (typeof config.hostedModel === 'string') {
+    hostedModel.value = config.hostedModel;
+  }
+  if (config.modelAccessMode === 'hosted' || config.modelAccessMode === 'ollama') {
+    setModelAccessMode(config.modelAccessMode);
+  }
+  const savedContextWindow = Number(config.contextWindow);
+  if (savedContextWindow >= 8192 && savedContextWindow <= 131072) {
+    preferredContextWindow = savedContextWindow;
+    if (Array.from(contextWindow.options).some((option) => Number(option.value) === savedContextWindow)) {
+      contextWindow.value = String(savedContextWindow);
+    }
+  }
+  if (config.hostedContextLimit && Number(config.hostedContextLimit) > 0) {
+    hostedContextLimit.value = String(config.hostedContextLimit);
+  }
+  if (typeof config.ragEnabled === 'boolean') {
+    ragEnabled.checked = config.ragEnabled;
+  }
+  if (['12', '24', '40'].includes(String(config.ragScope))) {
+    ragScope.value = String(config.ragScope);
+  }
   if (config.promptMode === 'skill' || config.promptMode === 'custom') {
     setPromptMode(config.promptMode);
   }
@@ -93,6 +153,142 @@ function applyConfig(config) {
   }
   if (config.customPrompt && typeof config.customPrompt === 'object') {
     setCustomPrompt(config.customPrompt);
+  }
+}
+
+function buildModelProviderPayload() {
+  if (modelAccessMode === 'hosted') {
+    return {
+      mode: 'hosted',
+      base_url: hostedBaseUrl.value.trim(),
+      model: hostedModel.value.trim(),
+      api_key: hostedApiKey.value.trim(),
+      context_limit: Number(hostedContextLimit.value) || null,
+    };
+  }
+  const selectedModel = currentModels.find((model) => model.name === modelSelect.value);
+  return { mode: 'ollama', model: modelSelect.value, context_limit: Number(selectedModel?.max_context_length) || null };
+}
+
+function syncHostedModelSummary() {
+  const modelName = hostedModel.value.trim();
+  const serverName = hostedBaseUrl.value.trim();
+  hostedModelSummary.value = modelName
+    ? `${modelName}${serverName ? ` via ${serverName}` : ''}`
+    : 'Configure the hosted model in Model access';
+}
+
+function getActiveContextLimit() {
+  if (modelAccessMode === 'hosted') {
+    return Number(hostedContextLimit.value) || null;
+  }
+  const selectedModel = currentModels.find((model) => model.name === modelSelect.value);
+  return Number(selectedModel?.max_context_length) || null;
+}
+
+function syncContextWindowOptions() {
+  const contextLimit = getActiveContextLimit();
+  const previousSelection = preferredContextWindow;
+  contextWindow.querySelectorAll('option[data-model-maximum]').forEach((option) => option.remove());
+  const hasExactOption = Array.from(contextWindow.options).some((option) => Number(option.value) === contextLimit);
+  if (contextLimit && contextLimit >= 8192 && contextLimit <= 131072 && !hasExactOption) {
+    const maximumOption = document.createElement('option');
+    maximumOption.value = String(contextLimit);
+    maximumOption.dataset.modelMaximum = 'true';
+    maximumOption.textContent = `${Number.isInteger(contextLimit / 1024) ? `${contextLimit / 1024}K` : contextLimit.toLocaleString()} tokens — model maximum`;
+    contextWindow.appendChild(maximumOption);
+    Array.from(contextWindow.options)
+      .sort((left, right) => Number(left.value) - Number(right.value))
+      .forEach((option) => contextWindow.appendChild(option));
+  }
+  const options = Array.from(contextWindow.options);
+  options.forEach((option) => {
+    option.disabled = !contextLimit || Number(option.value) > contextLimit;
+  });
+  const validOptions = options.filter((option) => !option.disabled);
+  contextWindow.disabled = validOptions.length === 0;
+  const previousOption = options.find((option) => Number(option.value) === previousSelection);
+  if (previousOption && !previousOption.disabled) {
+    contextWindow.value = previousOption.value;
+  } else if (validOptions.length) {
+    contextWindow.value = validOptions[validOptions.length - 1].value;
+  }
+
+  const selectedName = modelAccessMode === 'hosted' ? hostedModel.value.trim() : modelSelect.value;
+  if (!selectedName) {
+    contextWindowStatus.textContent = 'Select a model to check its supported context size.';
+  } else if (!contextLimit) {
+    contextWindowStatus.textContent = modelAccessMode === 'hosted'
+      ? 'The hosted model limit is unknown. Check the server or enter its maximum context before reviewing.'
+      : `Ollama did not report a context limit for ${selectedName}; explicit context choices are disabled.`;
+  } else if (!validOptions.length) {
+    contextWindowStatus.textContent = `${selectedName} reports a ${contextLimit.toLocaleString()}-token maximum, below the available review settings.`;
+  } else {
+    contextWindowStatus.textContent = `${selectedName} supports up to ${contextLimit.toLocaleString()} tokens. Oversized context choices are disabled.`;
+  }
+}
+
+function validateContextSelection() {
+  const contextLimit = getActiveContextLimit();
+  if (!contextLimit) {
+    throw new Error('The selected model context limit is unknown. Refresh local models, or check/configure the hosted server first.');
+  }
+  const selectedContext = Number(contextWindow.value);
+  if (!selectedContext || selectedContext > contextLimit) {
+    throw new Error(`Choose a context window no larger than ${contextLimit.toLocaleString()} tokens for the selected model.`);
+  }
+  return { selectedContext, contextLimit };
+}
+
+function setModelAccessMode(mode) {
+  modelAccessMode = mode === 'hosted' ? 'hosted' : 'ollama';
+  const hosted = modelAccessMode === 'hosted';
+  ollamaAccessPanel.hidden = hosted;
+  hostedAccessPanel.hidden = !hosted;
+  ollamaModelSelection.hidden = hosted;
+  hostedModelSelection.hidden = !hosted;
+  providerModeLabel.textContent = hosted ? 'Mode: Hosted model server' : 'Mode: Local Ollama';
+  providerModeBtn.textContent = hosted ? 'Switch to local Ollama' : 'Switch to hosted server';
+  syncHostedModelSummary();
+  syncContextWindowOptions();
+}
+
+function validateHostedProvider(provider) {
+  if (!provider.base_url) throw new Error('Enter the hosted model server URL.');
+  if (!provider.model) throw new Error('Enter the hosted model identifier.');
+}
+
+async function checkHostedServer() {
+  const provider = buildModelProviderPayload();
+  try {
+    validateHostedProvider(provider);
+    hostedHealthBtn.disabled = true;
+    hostedStatus.textContent = `Checking ${provider.base_url}...`;
+    const data = await fetchJson('/api/hosted/health', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: provider.model, model_provider: provider }),
+    });
+    if (data.error) throw new Error(data.error);
+    if (data.max_context_length) {
+      hostedContextLimit.value = String(data.max_context_length);
+      hostedDetectedModelName = provider.model;
+    }
+    syncContextWindowOptions();
+    const availability = data.model_available
+      ? `${provider.model} is available.`
+      : `${provider.model} was not listed by the server.`;
+    const listed = data.available_models?.length
+      ? `\nModels: ${data.available_models.join(', ')}`
+      : '\nThe server did not return a model catalogue; direct review requests may still work.';
+    const contextDetail = data.max_context_length
+      ? ` Maximum context: ${Number(data.max_context_length).toLocaleString()} tokens.`
+      : ' The server did not report a context maximum; enter the configured server limit manually.';
+    hostedStatus.textContent = `Hosted server ONLINE (${data.latency_seconds}s). ${availability}${contextDetail}${listed}`;
+  } catch (error) {
+    hostedStatus.textContent = `Hosted connection failed: ${error.message}`;
+  } finally {
+    hostedHealthBtn.disabled = false;
   }
 }
 
@@ -305,8 +501,65 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
+function featureErrorMessage(error, featureName) {
+  const message = String(error?.message || error || 'Unknown error');
+  if (/\b404\b|not found/i.test(message)) {
+    return `${featureName} is unavailable because the running ASCS Reviewer server is outdated. Restart the server, then reload this page.`;
+  }
+  return `${featureName} failed: ${message}`;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatByteSize(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let amount = bytes;
+  let unitIndex = -1;
+  do {
+    amount /= 1024;
+    unitIndex += 1;
+  } while (amount >= 1024 && unitIndex < units.length - 1);
+  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${units[unitIndex]}`;
+}
+
+function formatModelDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
+}
+
+function formatModelDateTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();
+}
+
+function renderModelMetadata(model) {
+  const metadata = [
+    ['Family', model.family],
+    ['Parameters', model.parameter_size],
+    ['Quantization', model.quantization_level],
+    ['Format', model.format ? String(model.format).toUpperCase() : ''],
+    ['Disk size', formatByteSize(model.size)],
+    ['Updated', formatModelDate(model.modified_at)],
+    ['Maximum context', model.max_context_length ? Number(model.max_context_length).toLocaleString() + ' tokens' : 'Not reported'],
+    ['Loaded context', model.context_length ? Number(model.context_length).toLocaleString() + ' tokens' : ''],
+    ['Memory', formatByteSize(model.size_vram)],
+    ['Loaded until', formatModelDateTime(model.expires_at)],
+  ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+
+  if (metadata.length === 0) {
+    return '<span class="model-meta-empty">No additional model metadata reported.</span>';
+  }
+  return metadata.map(([label, value]) => `
+    <span class="model-meta-item"><b>${escapeHtml(label)}</b>${escapeHtml(value)}</span>
+  `).join('');
 }
 
 async function refreshModels(options = {}) {
@@ -332,23 +585,35 @@ async function refreshModels(options = {}) {
       });
       modelsPane.innerHTML = models.map((model) => `
         <div class="model-row">
-          <span class="pill ${model.status === 'online' ? '' : 'offline'}">${model.name} · ${model.status}</span>
-          <div class="row" style="margin:0;">
-            <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="start">Start</button>
-            <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="ready">Check ready</button>
-            <button class="secondary" style="width:auto; padding:0.35rem 0.6rem; margin-top:0;" data-model="${model.name}" data-action="stop">Stop</button>
+          <div class="model-summary">
+            <span class="pill ${model.status === 'online' ? '' : 'offline'}">${escapeHtml(model.name)} · ${escapeHtml(model.status)}</span>
+            <div class="model-meta">${renderModelMetadata(model)}</div>
+          </div>
+          <div class="row model-actions">
+            <button class="secondary model-action" data-model="${escapeHtml(model.name)}" data-action="start">Start</button>
+            <button class="secondary model-action model-action-ready" data-model="${escapeHtml(model.name)}" data-action="ready">Check ready</button>
+            <button class="secondary model-action model-action-test" data-model="${escapeHtml(model.name)}" data-action="benchmark">Test</button>
+            <button class="secondary model-action" data-model="${escapeHtml(model.name)}" data-action="stop">Stop</button>
           </div>
         </div>
       `).join('');
       modelsPane.querySelectorAll('button[data-model]').forEach((button) => {
         button.addEventListener('click', () => {
+          const buttonModel = button.getAttribute('data-model');
+          if (Array.from(modelSelect.options).some((option) => option.value === buttonModel)) {
+            modelSelect.value = buttonModel;
+            preferredModelName = buttonModel;
+            syncContextWindowOptions();
+          }
           const action = button.getAttribute('data-action') || 'start';
           if (action === 'stop') {
-            stopModel(button.getAttribute('data-model'));
+            stopModel(buttonModel);
+          } else if (action === 'benchmark') {
+            runModelBenchmark(buttonModel, button);
           } else if (action === 'ready') {
-            checkModelReady(button.getAttribute('data-model'));
+            checkModelReady(buttonModel);
           } else {
-            startModel(button.getAttribute('data-model'));
+            startModel(buttonModel);
           }
         });
       });
@@ -358,6 +623,7 @@ async function refreshModels(options = {}) {
         modelSelect.value = preferredModel.name;
         preferredModelName = preferredModel.name;
       }
+      syncContextWindowOptions();
 
       if (pollForModel) {
         const targetModel = models.find((model) => model.name === pollForModel);
@@ -385,7 +651,12 @@ async function refreshModels(options = {}) {
 async function checkHealth() {
   try {
     const data = await fetchJson('/api/health');
-    healthStatus.textContent = `Ollama endpoint: ${data.ollama_base_url}\nStatus: ${data.status.toUpperCase()}\nModel count: ${data.model_count ?? 'n/a'}`;
+    const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
+    const missingCapabilities = REQUIRED_SERVER_CAPABILITIES.filter((capability) => !capabilities.includes(capability));
+    healthStatus.textContent = `Ollama endpoint: ${data.ollama_base_url}\nStatus: ${data.status.toUpperCase()}\nModel count: ${data.model_count ?? 'n/a'}\nReviewer API: ${data.api_version || 'outdated'}`;
+    if (missingCapabilities.length) {
+      healthStatus.textContent += `\nServer update required: restart ASCS Reviewer to enable ${missingCapabilities.join(', ')}.`;
+    }
     if (data.error) {
       healthStatus.textContent += `\nError: ${data.error}`;
     }
@@ -399,8 +670,9 @@ async function startModel(modelName) {
     return;
   }
   try {
+    const contextConfiguration = validateContextSelection();
     healthStatus.textContent = `Loading ${modelName} and checking readiness...`;
-    const data = await fetchJson('/api/models/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName }) });
+    const data = await fetchJson('/api/models/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName, context_window: contextConfiguration.selectedContext, model_context_limit: contextConfiguration.contextLimit }) });
     if (data.error) {
       healthStatus.textContent = `Start failed: ${data.error}`;
       return;
@@ -414,7 +686,8 @@ async function startModel(modelName) {
     await refreshModels({ pollForModel: modelName, expectedStatus: 'online', maxAttempts: 8, delayMs: 1200 });
     const refreshedModel = currentModels.find((model) => model.name === modelName);
     if (refreshedModel?.status === 'online') {
-      healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s.` : `Started ${modelName}`;
+      const contextLabel = data.context_window ? ` at ${(data.context_window / 1024).toFixed(0)}K context` : '';
+      healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s${contextLabel}.` : `Started ${modelName}${contextLabel}`;
     } else {
       healthStatus.textContent = `Start requested for ${modelName}. The model may still be loading.`;
     }
@@ -428,8 +701,9 @@ async function checkModelReady(modelName) {
     return;
   }
   try {
+    const contextConfiguration = validateContextSelection();
     healthStatus.textContent = `Checking whether ${modelName} can respond...`;
-    const data = await fetchJson('/api/models/ready', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName }) });
+    const data = await fetchJson('/api/models/ready', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName, context_window: contextConfiguration.selectedContext, model_context_limit: contextConfiguration.contextLimit }) });
     await refreshModels();
     if (data.error) {
       if (String(data.error).toLowerCase() === 'not found') {
@@ -440,7 +714,8 @@ async function checkModelReady(modelName) {
       return;
     }
     if (data.ready || data.status === 'ready') {
-      healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s.` : `Ready: ${modelName} responded.`;
+      const contextLabel = data.context_window ? ` at ${(data.context_window / 1024).toFixed(0)}K context` : '';
+      healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s${contextLabel}.` : `Ready: ${modelName} responded${contextLabel}.`;
       return;
     }
     healthStatus.textContent = `Not ready: ${data.error || data.reason || 'The model did not answer the readiness probe.'}`;
@@ -477,6 +752,68 @@ async function stopModel(modelName) {
   }
 }
 
+function renderBenchmarkResults() {
+  if (!benchmarkResults.size) {
+    benchmarkResultsBody.innerHTML = '<tr><td colspan="6" class="muted">Run Test on an installed model to add a result.</td></tr>';
+    return;
+  }
+  benchmarkResultsBody.innerHTML = Array.from(benchmarkResults.values())
+    .sort((left, right) => right.score - left.score)
+    .map((result) => `
+      <tr>
+        <td>${escapeHtml(result.model)}</td>
+        <td><b>${escapeHtml(result.score.toFixed(1))}/100</b></td>
+        <td>${escapeHtml(result.metrics.precision_percent)}%</td>
+        <td>${escapeHtml(result.metrics.recall_percent)}%</td>
+        <td>${escapeHtml(result.metrics.control_accuracy_percent)}%</td>
+        <td>${escapeHtml(result.review_seconds)}s</td>
+      </tr>
+    `).join('');
+}
+
+async function runModelBenchmark(modelName, button, providerConfig = null) {
+  if (!modelName) return;
+  const localModel = currentModels.find((model) => model.name === modelName);
+  const provider = providerConfig || { mode: 'ollama', model: modelName, context_limit: Number(localModel?.max_context_length) || null };
+  const previousLabel = button?.textContent || 'Test';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Testing...';
+  }
+  benchmarkStatus.textContent = `Preparing ${modelName} and running benchmark v1.0...`;
+  try {
+    const contextConfiguration = validateContextSelection();
+    const data = await fetchJson('/api/models/benchmark', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelName, model_provider: provider, context_window: contextConfiguration.selectedContext }),
+    });
+    if (data.error) throw new Error(data.error);
+    const resultKey = `${data.provider_mode || provider.mode}:${provider.base_url || ''}:${modelName}`;
+    benchmarkResults.set(resultKey, data);
+    renderBenchmarkResults();
+    const missed = data.metrics?.missed_findings || [];
+    const unexpected = data.metrics?.unexpected_findings || [];
+    const detail = [
+      missed.length ? `Missed: ${missed.map((item) => `${item.requirement_id}/${item.rule_id}`).join(', ')}.` : 'All seeded defects found.',
+      unexpected.length ? `Unexpected: ${unexpected.map((item) => `${item.requirement_id}/${item.rule_id}`).join(', ')}.` : 'No unexpected findings.',
+      data.parse_error ? data.parse_error : '',
+    ].filter(Boolean).join(' ');
+    const contextLabel = data.context_window ? ` with a ${(data.context_window / 1024).toFixed(0)}K context window` : '';
+    benchmarkStatus.textContent = `${modelName} scored ${data.score.toFixed(1)}/100${contextLabel} in ${data.review_seconds}s after ${data.warmup_seconds}s warm-up. ${detail}`;
+    if ((data.provider_mode || provider.mode) === 'ollama') {
+      await refreshModels();
+    }
+  } catch (error) {
+    benchmarkStatus.textContent = `${featureErrorMessage(error, 'Model benchmark')} Model: ${modelName}.`;
+  } finally {
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.textContent = previousLabel;
+    }
+  }
+}
+
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
@@ -493,7 +830,7 @@ function readFileAsDocument(file) {
     const reader = new FileReader();
     reader.onload = () => {
       const buffer = reader.result;
-      const isTextLike = file.type.startsWith('text/') || /\.(txt|md|rtf|json|csv|tsv|log|ya?ml|xml|html?|toml|ini|cfg|conf|rst|py|c|h|cc|hh|cpp|hpp|cxx|hxx|js|jsx|ts|tsx|java|cs|sql|sh|bat|ps1|m|mm|s|asm)$/i.test(file.name);
+      const isTextLike = file.type.startsWith('text/') || /\.(txt|md|rtf|json|csv|tsv|log|ya?ml|xml|html?|toml|ini|cfg|conf|rst|py|c|h|cc|hh|cpp|hpp|cxx|hxx|js|jsx|ts|tsx|java|cs|sql|sh|bat|ps1|m|mm|s|asm|scade|xscade|etp|sgfx|pgfx|ogfx|dgfx|sdfx|rgfx|sss|in|sns|out|obs)$/i.test(file.name);
       const document = {
         name: file.name,
         data_base64: arrayBufferToBase64(buffer),
@@ -508,6 +845,74 @@ function readFileAsDocument(file) {
     reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
     reader.readAsArrayBuffer(file);
   });
+}
+
+function renderRagStatus(data) {
+  if (!data?.loaded) {
+    ragStatus.textContent = 'No retrieval knowledge is loaded.';
+    return;
+  }
+  const vectorDetail = data.vector_chunk_count
+    ? ` ${data.vector_chunk_count} chunk(s) have ${data.dimensions || 'unknown'}-dimension vectors${data.embedding_model ? ` from ${data.embedding_model}` : ''}.`
+    : '';
+  ragStatus.textContent = `${data.name || 'Knowledge store'}: ${data.chunk_count || 0} chunk(s) across ${data.source_count || 0} source(s). Retrieval: ${data.retrieval_mode}.${vectorDetail}`;
+}
+
+async function refreshRagStatus() {
+  try {
+    renderRagStatus(await fetchJson('/api/rag/status'));
+  } catch (error) {
+    ragStatus.textContent = featureErrorMessage(error, 'Retrieval status');
+  }
+}
+
+async function handleRagStoreSelection(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  ragStatus.textContent = `Loading vector store ${file.name}...`;
+  try {
+    const store = JSON.parse(await file.text());
+    const data = await fetchJson('/api/rag/load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, store, append: false }),
+    });
+    if (data.error) throw new Error(data.error);
+    renderRagStatus(data);
+  } catch (error) {
+    ragStatus.textContent = featureErrorMessage(error, 'Vector store load');
+  } finally {
+    event.target.value = '';
+  }
+}
+
+async function handleRagDocumentSelection(event) {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) return;
+  ragStatus.textContent = `Indexing ${files.length} knowledge document(s)...`;
+  try {
+    const documents = await Promise.all(files.map(readFileAsDocument));
+    const data = await fetchJson('/api/rag/load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Knowledge documents', documents, append: true }),
+    });
+    if (data.error) throw new Error(data.error);
+    renderRagStatus(data);
+  } catch (error) {
+    ragStatus.textContent = featureErrorMessage(error, 'Knowledge indexing');
+  } finally {
+    event.target.value = '';
+  }
+}
+
+async function clearRagKnowledge() {
+  ragStatus.textContent = 'Clearing retrieval knowledge...';
+  try {
+    renderRagStatus(await fetchJson('/api/rag/clear', { method: 'POST' }));
+  } catch (error) {
+    ragStatus.textContent = featureErrorMessage(error, 'Clear knowledge');
+  }
 }
 
 async function handleFileSelection(event) {
@@ -575,12 +980,19 @@ function removeSelectedReviewDocument() {
 }
 
 function buildReviewPayload() {
+  const modelProvider = buildModelProviderPayload();
   const payload = {
-    model: modelSelect.value,
+    model: modelProvider.model,
+    model_provider: modelProvider,
+    context_window: Number(contextWindow.value),
     prompt_mode: promptMode,
     document_text: document.getElementById('documentText').value,
     d0178c_context: document.getElementById('d0178cContext').value,
     reference_documents: referenceEntries.filter((entry) => entry.content || entry.data_base64),
+    rag: {
+      enabled: ragEnabled.checked,
+      max_chunks: Number(ragScope.value) || 24,
+    },
   };
   if (promptMode === 'custom') {
     payload.custom_prompt = getCustomPrompt();
@@ -596,10 +1008,16 @@ function buildReviewPayload() {
 }
 
 async function runReview() {
-  reviewStatus.textContent = 'Reviewing with high effort. Large local models can take several minutes...';
+  reviewStatus.textContent = modelAccessMode === 'hosted'
+    ? 'Sending the review to the hosted model server...'
+    : 'Reviewing with high effort. Large local models can take several minutes...';
   reviewOutput.textContent = 'Generating complete-document review...';
   try {
+    validateContextSelection();
     const payload = buildReviewPayload();
+    if (payload.model_provider.mode === 'hosted') {
+      validateHostedProvider(payload.model_provider);
+    }
     const data = await fetchJson('/api/reviewer/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     if (data.error) {
       reviewStatus.textContent = `Review failed: ${data.error}`;
@@ -609,8 +1027,16 @@ async function runReview() {
     const reviewResult = data.review_result || { summary: data.review || 'No review generated.', sections: [], atomic_comments: [] };
     window.latestReviewResult = reviewResult;
     const reviewMethod = data.skill_name ? ` using ${data.skill_name}` : '';
-    reviewStatus.textContent = `Review completed with ${data.model}${reviewMethod} across ${data.source_count || 0} source document(s)`;
+    const retrievalMethod = data.retrieval
+      ? `; selected ${data.retrieval.selected_chunks || 0} of ${data.retrieval.available_chunks || 0} available knowledge chunk(s)`
+      : '';
+    const providerMethod = data.provider_mode === 'hosted' ? 'hosted model' : 'local Ollama';
+    const contextLabel = data.context_window ? ` using ${(data.context_window / 1024).toFixed(0)}K context` : '';
+    reviewStatus.textContent = `Review completed with ${data.model} via ${providerMethod}${contextLabel}${reviewMethod} across ${data.source_count || 0} source document(s)${retrievalMethod}`;
     renderReviewOutput(reviewResult);
+    if (data.provider_mode !== 'hosted') {
+      refreshModels();
+    }
   } catch (error) {
     reviewStatus.textContent = error.message;
     reviewOutput.textContent = error.message;
@@ -618,7 +1044,8 @@ async function runReview() {
 }
 
 async function runTraceabilityAnalysis() {
-  traceabilityPanel.style.display = 'flex';
+  traceabilityPanel.style.display = 'block';
+  traceabilityPanel.open = true;
   traceabilityOutput.textContent = 'Building traceability analysis...';
   reviewStatus.textContent = 'Building traceability analysis.';
   try {
@@ -876,7 +1303,8 @@ function hasReviewResult(reviewResult) {
 
 function buildExportFileName() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const modelName = (modelSelect.value || 'model').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'model';
+  const selectedModel = modelAccessMode === 'hosted' ? hostedModel.value : modelSelect.value;
+  const modelName = (selectedModel || 'model').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'model';
   return `review-output-${modelName}-${timestamp}.txt`;
 }
 
@@ -976,10 +1404,49 @@ function exportTraceabilityAnalysis() {
 
 document.getElementById('refreshBtn').addEventListener('click', refreshModels);
 document.getElementById('healthBtn').addEventListener('click', checkHealth);
+providerModeBtn.addEventListener('click', () => {
+  setModelAccessMode(modelAccessMode === 'ollama' ? 'hosted' : 'ollama');
+});
+hostedHealthBtn.addEventListener('click', checkHostedServer);
+hostedBenchmarkBtn.addEventListener('click', () => {
+  const provider = buildModelProviderPayload();
+  try {
+    validateHostedProvider(provider);
+    runModelBenchmark(provider.model, hostedBenchmarkBtn, provider);
+  } catch (error) {
+    benchmarkStatus.textContent = error.message;
+  }
+});
+hostedBaseUrl.addEventListener('input', () => {
+  syncHostedModelSummary();
+  if (hostedDetectedModelName) {
+    hostedContextLimit.value = '';
+    hostedDetectedModelName = '';
+  }
+  syncContextWindowOptions();
+});
+hostedModel.addEventListener('input', () => {
+  syncHostedModelSummary();
+  if (hostedDetectedModelName && hostedModel.value.trim() !== hostedDetectedModelName) {
+    hostedContextLimit.value = '';
+    hostedDetectedModelName = '';
+  }
+  syncContextWindowOptions();
+});
+hostedContextLimit.addEventListener('input', () => {
+  hostedDetectedModelName = '';
+  syncContextWindowOptions();
+});
+contextWindow.addEventListener('change', () => {
+  preferredContextWindow = Number(contextWindow.value) || preferredContextWindow;
+});
 document.getElementById('reviewBtn').addEventListener('click', runReview);
 document.getElementById('traceabilityBtn').addEventListener('click', runTraceabilityAnalysis);
 document.getElementById('downloadReviewTextBtn').addEventListener('click', () => exportReview());
 document.getElementById('downloadTraceabilityBtn').addEventListener('click', exportTraceabilityAnalysis);
+document.getElementById('loadRagStoreBtn').addEventListener('click', () => ragStoreInput.click());
+document.getElementById('addRagDocumentsBtn').addEventListener('click', () => ragDocumentsInput.click());
+document.getElementById('clearRagBtn').addEventListener('click', clearRagKnowledge);
 addReferenceBtn.addEventListener('click', () => fileInput.click());
 removeReferenceBtn.addEventListener('click', removeSelectedReference);
 addReviewDocBtn.addEventListener('click', () => reviewFileInput.click());
@@ -996,14 +1463,19 @@ skillModeRadio.addEventListener('change', () => setPromptMode('skill'));
 customModeRadio.addEventListener('change', () => setPromptMode('custom'));
 modelSelect.addEventListener('change', () => {
   preferredModelName = modelSelect.value;
+  syncContextWindowOptions();
 });
 fileInput.addEventListener('change', handleFileSelection);
 reviewFileInput.addEventListener('change', handleReviewDocumentSelection);
+ragStoreInput.addEventListener('change', handleRagStoreSelection);
+ragDocumentsInput.addEventListener('change', handleRagDocumentSelection);
 
 const savedConfig = readConfig();
 applyConfig(savedConfig);
+setModelAccessMode(modelAccessMode);
 setReviewInputMode(reviewInputMode);
 setPromptMode(promptMode);
 checkHealth();
 refreshModels();
 loadSkills();
+refreshRagStatus();
