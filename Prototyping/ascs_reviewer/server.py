@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter
@@ -59,8 +60,8 @@ RAG_STORE = {
     "dimensions": 0,
     "chunks": [],
 }
-API_VERSION = "1.5"
-API_CAPABILITIES = ["context-window-v1", "model-context-discovery-v1", "hosted-model-v1", "model-benchmark-v1", "rag-store-v1", "scade-parser-v1"]
+API_VERSION = "1.7"
+API_CAPABILITIES = ["context-window-v1", "model-context-discovery-v1", "hosted-model-v1", "model-benchmark-v1", "rag-store-v1", "rag-document-lifecycle-v1", "indexed-reference-workflow-v1", "staged-retrieval-v1", "chunk-token-count-v1", "scade-parser-v1"]
 BENCHMARK_VERSION = "1.0"
 BENCHMARK_EXPECTED_FINDINGS = {
     ("LLR-B01", "BENCH-R1"): "Undefined zero-divisor behaviour",
@@ -164,6 +165,11 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
 
         if path == "/api/rag/clear":
             self._send_json(self._clear_rag_content())
+            return
+
+        if path == "/api/rag/remove":
+            body = self._read_json_body()
+            self._send_json(self._remove_rag_documents(body))
             return
 
         self._send_json({"error": "Not found"}, status=404)
@@ -658,13 +664,29 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
     def _get_rag_status(self):
         with RAG_LOCK:
             chunks = list(RAG_STORE["chunks"])
-            sources = {chunk.get("source") or "knowledge" for chunk in chunks}
+            documents_by_id = {}
+            for chunk in chunks:
+                source = chunk.get("source") or "knowledge"
+                document_id = chunk.get("document_id") or f"source:{source}"
+                document = documents_by_id.setdefault(
+                    document_id,
+                    {"document_id": document_id, "name": source, "chunk_count": 0, "token_count": 0, "chunks": []},
+                )
+                document["chunk_count"] += 1
+                token_count = self._chunk_token_count(chunk.get("content") or "")
+                document["token_count"] += token_count
+                document["chunks"].append({
+                    "id": str(chunk.get("id") or f"chunk-{document['chunk_count']}"),
+                    "token_count": token_count,
+                })
             vector_chunks = sum(1 for chunk in chunks if chunk.get("embedding"))
             return {
                 "loaded": bool(chunks),
                 "name": RAG_STORE["name"],
                 "chunk_count": len(chunks),
-                "source_count": len(sources),
+                "source_count": len(documents_by_id),
+                "documents": list(documents_by_id.values()),
+                "token_count": sum(document["token_count"] for document in documents_by_id.values()),
                 "vector_chunk_count": vector_chunks,
                 "dimensions": RAG_STORE["dimensions"],
                 "embedding_model": RAG_STORE["embedding_model"],
@@ -676,6 +698,44 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         with RAG_LOCK:
             RAG_STORE = {"name": "", "embedding_model": "", "dimensions": 0, "chunks": []}
         return {"ok": True, **self._get_rag_status()}
+
+    def _remove_rag_documents(self, body):
+        if not isinstance(body, dict) or not isinstance(body.get("document_ids"), list):
+            return {"error": "Provide a list of RAG document IDs to remove."}
+        document_ids = {
+            str(document_id).strip()
+            for document_id in body["document_ids"]
+            if str(document_id).strip()
+        }
+        if not document_ids:
+            return {"error": "Select at least one RAG document to remove."}
+
+        global RAG_STORE
+        with RAG_LOCK:
+            existing_chunks = list(RAG_STORE["chunks"])
+            removed_document_ids = {
+                chunk.get("document_id")
+                for chunk in existing_chunks
+                if chunk.get("document_id") in document_ids
+            }
+            remaining_chunks = [
+                chunk for chunk in existing_chunks if chunk.get("document_id") not in document_ids
+            ]
+            removed_chunks = len(existing_chunks) - len(remaining_chunks)
+            remaining_has_vectors = any(chunk.get("embedding") for chunk in remaining_chunks)
+            RAG_STORE = {
+                "name": RAG_STORE["name"] if remaining_chunks else "",
+                "embedding_model": RAG_STORE["embedding_model"] if remaining_has_vectors else "",
+                "dimensions": RAG_STORE["dimensions"] if remaining_has_vectors else 0,
+                "chunks": remaining_chunks,
+            }
+        status = self._get_rag_status()
+        return {
+            "ok": True,
+            "removed_chunk_count": removed_chunks,
+            "removed_document_count": len(removed_document_ids),
+            **status,
+        }
 
     def _load_rag_content(self, body):
         if not isinstance(body, dict):
@@ -733,6 +793,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             return {"error": f"Vector dimensions must be between 1 and {RAG_MAX_VECTOR_DIMENSIONS}."}
 
         normalized = []
+        source_document_ids = {}
         detected_dimensions = 0
         total_characters = 0
         for index, chunk in enumerate(raw_chunks, start=1):
@@ -765,7 +826,16 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
             source = str(chunk.get("source") or metadata.get("source") or metadata.get("document") or default_name).strip()
             chunk_id = str(chunk.get("id") or metadata.get("id") or f"chunk-{index}").strip()
-            normalized.append({"id": chunk_id, "source": source, "content": content, "embedding": embedding})
+            document_id = str(chunk.get("document_id") or metadata.get("document_id") or "").strip()
+            if not document_id:
+                document_id = source_document_ids.setdefault(source, f"vector-{uuid.uuid4().hex}")
+            normalized.append({
+                "id": chunk_id,
+                "document_id": document_id,
+                "source": source,
+                "content": content,
+                "embedding": embedding,
+            })
 
         if not normalized:
             return {"error": "The vector store did not contain readable chunk content."}
@@ -782,13 +852,29 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         }
 
     def _build_rag_entries_from_documents(self, documents, name):
-        chunks = self._chunk_documents(documents, "KNOWLEDGE")
         entries = []
-        for index, content in enumerate(chunks, start=1):
-            source_match = re.match(r"\[KNOWLEDGE:\s*([^|\]]+)", content)
-            source = source_match.group(1).strip() if source_match else name
-            entries.append({"id": f"knowledge-{index}", "source": source, "content": content, "embedding": []})
+        for document in documents:
+            source = document.get("name") or str(name)
+            document_id = str(document.get("document_id") or f"document-{uuid.uuid4().hex}").strip()
+            chunks = self._chunk_documents([document], "KNOWLEDGE")
+            for index, content in enumerate(chunks, start=1):
+                entries.append({
+                    "id": f"{document_id}-chunk-{index}",
+                    "document_id": document_id,
+                    "source": source,
+                    "content": content,
+                    "embedding": [],
+                })
         return {"name": str(name), "embedding_model": "", "dimensions": 0, "chunks": entries}
+
+    def _chunk_token_count(self, content):
+        """Return a model-neutral token estimate for chunk visibility and budgeting."""
+        text = str(content or "").strip()
+        if not text:
+            return 0
+        lexical_tokens = len(re.findall(r"\w+|[^\w\s]", text, re.UNICODE))
+        character_estimate = math.ceil(len(text) / APPROX_CHARS_PER_TOKEN)
+        return max(1, round((lexical_tokens + character_estimate) / 2))
 
     def _build_reviewer_response(self, body):
         if not isinstance(body, dict):
@@ -811,7 +897,6 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return {"error": str(exc), "review": "", "retrieved_chunks": [], "model": model, "provider_mode": provider["mode"]}
         documents = body.get("documents") or []
-        d0178c_context = (body.get("d0178c_context") or "").strip()
         reference_document_entries = body.get("reference_documents") or []
         rag_options = body.get("rag") if isinstance(body.get("rag"), dict) else {}
         rag_enabled = rag_options.get("enabled", True) is not False
@@ -830,7 +915,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         else:
             return {"error": "Please provide documentation text or files to review."}
 
-        reference_documents = self._collect_reference_documents(d0178c_context, reference_document_entries)
+        reference_documents = self._collect_reference_documents(reference_document_entries)
         rag_status = self._get_rag_status()
         source_count = len(target_documents) + len(reference_documents) + (rag_status["source_count"] if rag_enabled else 0)
 
@@ -850,11 +935,21 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         target_chunks = self._chunk_documents(target_documents, "TARGET")
         reference_chunks = self._chunk_documents(reference_documents, "REFERENCE")
         target_context_text = self._build_complete_target_context(target_chunks)
-        retrieval_query = " ".join([skills_prompt, review_goal, target_context_text])
+        relevance_plan = self._build_relevance_stepthrough(target_chunks, skills_prompt, review_goal)
+        retrieval_query = relevance_plan["query"]
         retrieved_reference = self._retrieve_relevant_chunks(
-            reference_chunks, skills_prompt, review_goal, target_context_text, limit=retrieval_limit
+            reference_chunks,
+            skills_prompt,
+            review_goal,
+            relevance_plan["comparison_text"],
+            limit=retrieval_limit,
+            focus_chunks=relevance_plan["focus_chunks"],
         )
-        retrieved_rag = self._retrieve_rag_chunks(retrieval_query, retrieval_limit) if rag_enabled else []
+        retrieved_rag = self._retrieve_rag_chunks(
+            retrieval_query,
+            retrieval_limit,
+            focus_queries=relevance_plan["focus_chunks"],
+        ) if rag_enabled else []
         retrieval_candidates = self._interleave_chunks(retrieved_reference, retrieved_rag)
         retrieval_budget = self._calculate_retrieval_budget(
             len(target_context_text), len(skills_prompt) + len(review_goal), context_window
@@ -870,6 +965,13 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             "loaded_store": rag_status["name"] if rag_enabled else "",
             "retrieval_mode": rag_status["retrieval_mode"] if rag_enabled and rag_status["loaded"] else "local TF-IDF vector",
             "vector_chunks": rag_status["vector_chunk_count"] if rag_enabled else 0,
+            "relevance_stepthrough": {
+                "strategy": "section-aware staged retrieval",
+                "target_chunks_scanned": len(target_chunks),
+                "focus_chunks": len(relevance_plan["focus_chunks"]),
+                "focus_locations": relevance_plan["focus_locations"],
+                "query_characters": len(retrieval_query),
+            },
         }
 
         user_prompt = self._build_review_prompt(prompt_configuration["prompt_configuration"], target_context_text, reference_context_text)
@@ -924,6 +1026,24 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
                 "retrieval": retrieval_summary,
             }
         review_result = self._parse_review_result(review_text)
+        repair_attempted = self._review_requires_atomic_comment_repair(review_result)
+        repair_source = ""
+        if repair_attempted:
+            repaired_comments = self._request_atomic_comment_repair(
+                provider, model, context_window, review_text
+            )
+            if repaired_comments:
+                review_result["atomic_comments"] = repaired_comments
+                repair_source = "model repair"
+            else:
+                fallback_comments = self._build_atomic_comments_from_section_prose(review_result["sections"])
+                if fallback_comments:
+                    review_result["atomic_comments"] = fallback_comments
+                    repair_source = "section fallback"
+        review_result["sections"] = [
+            section for section in review_result["sections"]
+            if not self._is_atomic_comments_summary_section(section)
+        ]
         return {
             "review": review_result.get("summary") or review_text.strip(),
             "review_result": review_result,
@@ -933,6 +1053,11 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             "context_window": context_window,
             "source_count": source_count,
             "retrieval": retrieval_summary,
+            "atomic_comment_repair": {
+                "attempted": repair_attempted,
+                "source": repair_source,
+                "comment_count": len(review_result["atomic_comments"]),
+            },
             "prompt_mode": prompt_configuration["prompt_mode"],
             "skill_name": prompt_configuration.get("skill_name"),
         }
@@ -1033,7 +1158,6 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
 
         document_text = (body.get("document_text") or "").strip()
         documents = body.get("documents") or []
-        d0178c_context = (body.get("d0178c_context") or "").strip()
         reference_document_entries = body.get("reference_documents") or []
 
         if documents:
@@ -1046,13 +1170,11 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         else:
             return {"error": "Please provide target documentation before running traceability analysis."}
 
-        reference_documents = self._collect_reference_documents(d0178c_context, reference_document_entries)
+        reference_documents = self._collect_reference_documents(reference_document_entries)
         artefacts = []
         for index, document in enumerate(target_documents, start=1):
             artefacts.append(self._build_traceability_artefact(document, "target", f"target-{index}"))
         for index, document in enumerate(reference_documents, start=1):
-            if document.get("name") == "DO-178C-context":
-                continue
             artefacts.append(self._build_traceability_artefact(document, "associated", f"associated-{index}"))
 
         all_requirements = []
@@ -1514,20 +1636,18 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             {
                 "title": section["title"],
                 "content": (
-                    f"{section['instruction']} Perform every applicable check in this section. For each distinct "
-                    "issue, provide Location, Rule violated, Rule evidence, Issue, Evidence, and Target fix. "
-                    "If every check passes, state that explicitly; identify non-applicable checks and why."
+                    f"{section['instruction']} Concisely summarize coverage, passes, and non-applicable checks for "
+                    "this section. Put every actionable issue in atomic_comments instead of duplicating its details here."
                 ),
             }
             for section in review_sections
         ]
         output_contract = {
             "summary": "Short overall assessment",
-            "sections": section_contract,
             "atomic_comments": [
                 {
                     "id": "A1",
-                    "location": "TARGET document, section and paragraph/row label",
+                    "location": "Exact TARGET provenance header when available; otherwise the best target identifier or Target location not specified",
                     "violated_rule": "REFERENCE rule identifier/title, or Not found in provided reference material",
                     "rule_evidence": "Short paraphrase of the governing obligation",
                     "issue": "Short target-document issue description",
@@ -1535,6 +1655,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
                     "suggested_resolution": "Actionable change to the TARGET document",
                 }
             ],
+            "sections": section_contract,
         }
         configured_instructions = "\n".join(f"- {instruction}" for instruction in instructions)
 
@@ -1553,11 +1674,17 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             "- Record a clear pass or justified not-applicable result when a section produces no finding.\n\n"
             "Evidence rules:\n"
             "- Report a finding only when it applies to the TARGET and is supported by target evidence.\n"
-            "- Give the exact TARGET document, section, and paragraph/row label. Never invent page numbers.\n"
+            "- Every target chunk starts with a provenance header such as [TARGET: document | section X | paragraph/row/requirement Y]. Copy that exact location without the surrounding brackets.\n"
+            "- Prefer the resolved section supplied in the TARGET header. If an exact location cannot be resolved, use the best document/requirement/row/paragraph identifier available, or 'Target location not specified'.\n"
+            "- Never omit a finding or atomic comment because its exact location is unavailable, and never use 'section not resolved'. Never invent page numbers.\n"
             "- Identify the governing REFERENCE rule when available and explain its obligation separately.\n"
             "- If no governing rule is supplied, write 'Not found in provided reference material'.\n"
             "- For interface findings, first compare the target against any supplied interface definition.\n"
-            "- Keep each issue atomic and repeat it in atomic_comments.\n\n"
+            "- Put every actionable issue exactly once in atomic_comments; do not rely on section prose to report findings.\n\n"
+            "Output-priority rules:\n"
+            "- Populate the complete atomic_comments array before writing sections. It is mandatory whenever any issue is reported.\n"
+            "- Never create an atomic_comments_summary section and never replace the array with text that points to another list.\n"
+            "- Keep section content concise so the response budget is reserved for the complete atomic comment list.\n\n"
             f"Complete TARGET content:\n{target_context_text}\n\n"
             f"REFERENCE material:\n{reference_context_text}\n\n"
             "Return only valid JSON matching this configured contract:\n"
@@ -1569,54 +1696,90 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             return {"summary": "No review returned.", "sections": [], "atomic_comments": []}
 
         text = review_text.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:].strip()
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
+        parsed = self._extract_json_value(text)
+        if parsed is None:
             return {
                 "summary": text,
                 "sections": [{"title": "Review", "content": text}],
                 "atomic_comments": [],
             }
 
-        if not isinstance(parsed, dict):
-            return {"summary": str(parsed), "sections": [], "atomic_comments": []}
-
-        sections = parsed.get("sections") or []
-        if not isinstance(sections, list):
-            sections = []
-
-        atomic_comments = parsed.get("atomic_comments") or []
-        if not isinstance(atomic_comments, list):
-            atomic_comments = []
-
-        normalized_sections = [
-            {
-                "title": section.get("title") or "Review",
-                "content": self._remove_page_references_from_locations(section.get("content") or ""),
+        if isinstance(parsed, list):
+            issue_keys = {"issue", "problem", "comment", "location", "suggested_resolution", "target_fix"}
+            contains_comments = any(isinstance(item, dict) and issue_keys.intersection(item) for item in parsed)
+            parsed = {
+                "summary": "Review completed.",
+                "atomic_comments" if contains_comments else "sections": parsed,
             }
-            for section in sections
-            if isinstance(section, dict)
+
+        for wrapper_key in ("review_result", "review", "result", "output"):
+            nested = parsed.get(wrapper_key) if isinstance(parsed, dict) else None
+            if isinstance(nested, str):
+                nested = self._extract_json_value(nested)
+            if isinstance(nested, dict) and not any(key in parsed for key in ("summary", "sections", "atomic_comments")):
+                parsed = nested
+                break
+
+        if not isinstance(parsed, dict):
+            return {"summary": self._format_review_value(parsed), "sections": [], "atomic_comments": []}
+
+        sections = parsed.get("sections") or parsed.get("review_sections") or []
+        if isinstance(sections, dict):
+            sections = [{"title": title, "content": content} for title, content in sections.items()]
+        elif not isinstance(sections, list):
+            sections = [sections] if sections else []
+
+        atomic_comments = parsed.get("atomic_comments") or parsed.get("atomicComments") or parsed.get("comments") or parsed.get("findings") or []
+        if isinstance(atomic_comments, dict):
+            atomic_comments = [
+                ({"id": comment_id, **comment} if isinstance(comment, dict) else {"id": comment_id, "comment": comment})
+                for comment_id, comment in atomic_comments.items()
+            ]
+        elif not isinstance(atomic_comments, list):
+            atomic_comments = [atomic_comments] if atomic_comments else []
+        atomic_comments = [
+            comment if isinstance(comment, dict) else {"comment": comment}
+            for comment in atomic_comments
         ]
+
+        normalized_sections = []
+        for index, section in enumerate(sections):
+            if isinstance(section, dict):
+                title = section.get("title") or section.get("name") or f"Review section {index + 1}"
+                content = section.get("content")
+                if content is None:
+                    content = (
+                        section.get("findings")
+                        or section.get("issues")
+                        or section.get("assessment")
+                        or section.get("text")
+                        or {key: value for key, value in section.items() if key not in {"title", "name"}}
+                    )
+            else:
+                title = f"Review section {index + 1}"
+                content = section
+            normalized_sections.append({
+                "title": self._format_review_value(title) or "Review",
+                "content": self._remove_page_references_from_locations(self._format_review_value(content)),
+            })
+
         normalized_comments = [
             {
-                "id": comment.get("id") or f"A{index + 1}",
-                "location": self._normalize_location_label(comment.get("location") or ""),
+                "id": self._format_review_value(comment.get("id") or f"A{index + 1}"),
+                "location": self._normalize_location_label(self._format_review_value(comment.get("location") or "")) or "Target location not specified",
                 "violated_rule": self._normalize_rule_label(
-                    comment.get("violated_rule")
-                    or comment.get("rule_violated")
-                    or comment.get("applicable_rule")
-                    or comment.get("rule")
-                    or ""
+                    self._format_review_value(
+                        comment.get("violated_rule")
+                        or comment.get("rule_violated")
+                        or comment.get("applicable_rule")
+                        or comment.get("rule")
+                        or ""
+                    )
                 ),
-                "rule_evidence": comment.get("rule_evidence") or comment.get("rule_reference") or "",
-                "issue": comment.get("issue") or "Issue",
-                "comment": comment.get("comment") or "",
-                "suggested_resolution": comment.get("suggested_resolution") or "",
+                "rule_evidence": self._format_review_value(comment.get("rule_evidence") or comment.get("rule_reference") or ""),
+                "issue": self._format_review_value(comment.get("issue") or comment.get("title") or "Issue"),
+                "comment": self._format_review_value(comment.get("comment") or comment.get("evidence") or comment.get("details") or ""),
+                "suggested_resolution": self._format_review_value(comment.get("suggested_resolution") or comment.get("target_fix") or comment.get("resolution") or ""),
             }
             for index, comment in enumerate(atomic_comments)
             if isinstance(comment, dict)
@@ -1624,10 +1787,202 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         normalized_comments = self._ensure_atomic_comments_cover_section_issues(normalized_sections, normalized_comments)
 
         return {
-            "summary": parsed.get("summary") or "Review completed.",
+            "summary": self._format_review_value(
+                parsed.get("summary")
+                or parsed.get("overall_assessment")
+                or parsed.get("executive_summary")
+                or "Review completed."
+            ),
             "sections": normalized_sections,
             "atomic_comments": normalized_comments,
         }
+
+    def _review_requires_atomic_comment_repair(self, review_result):
+        if review_result.get("atomic_comments"):
+            return False
+        sections = review_result.get("sections") or []
+        if any(self._is_atomic_comments_summary_section(section) for section in sections):
+            return True
+        issue_language = re.compile(
+            r"\b(missing|absent|undefined|unclear|ambiguous|inconsistent|conflict|confusion|gap|risk|"
+            r"fail(?:s|ed|ure)?|unapproved|incomplete|insufficient|incorrect|lacks?|should|however)\b",
+            re.IGNORECASE,
+        )
+        return any(issue_language.search(str(section.get("content") or "")) for section in sections)
+
+    def _is_atomic_comments_summary_section(self, section):
+        title = str(section.get("title") or "") if isinstance(section, dict) else ""
+        normalized = re.sub(r"[^a-z0-9]+", "", title.lower())
+        return normalized in {"atomiccommentssummary", "atomiccommentslist", "atomiccomments"}
+
+    def _request_atomic_comment_repair(self, provider, model, context_window, review_text):
+        repair_contract = {
+            "atomic_comments": [
+                {
+                    "id": "A1",
+                    "location": "Best available TARGET provenance, or Target location not specified",
+                    "violated_rule": "REFERENCE rule, or Not found in provided reference material",
+                    "rule_evidence": "Short governing obligation",
+                    "issue": "One concise issue",
+                    "comment": "Target evidence and required correction",
+                    "suggested_resolution": "Specific actionable resolution",
+                }
+            ]
+        }
+        prompt = (
+            "The previous review omitted its mandatory atomic_comments array. Convert every actionable issue in "
+            "the previous review into one atomic comment. Preserve all distinct issues, do not create comments "
+            "for passes or not-applicable statements, do not reassess the source documents, and do not omit an "
+            "issue when its location is unavailable. Return only valid JSON matching this contract:\n"
+            f"{json.dumps(repair_contract, ensure_ascii=False, indent=2)}\n\n"
+            f"Previous review response:\n{review_text}"
+        )
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "Convert review findings into complete atomic engineering comments."},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "format": "json",
+            "options": self._build_review_model_options(len(prompt), context_window),
+            "keep_alive": MODEL_KEEP_ALIVE,
+        }
+        response = self._request_model_chat(provider, payload, timeout=OLLAMA_REVIEW_TIMEOUT_SECONDS)
+        repair_text, error = self._extract_review_text(response)
+        if error:
+            return []
+        return self._parse_review_result(repair_text).get("atomic_comments") or []
+
+    def _build_atomic_comments_from_section_prose(self, sections):
+        comments = []
+        issue_language = re.compile(
+            r"\b(missing|absent|undefined|unclear|ambiguous|inconsistent|conflict|confusion|gap|risk|"
+            r"fail(?:s|ed|ure)?|unapproved|incomplete|insufficient|incorrect|lacks?|should|however)\b|"
+            r"\b(?:no|not)\s+(?:clear|defined|specified|provided|identified|documented|traceable|consistent)\b",
+            re.IGNORECASE,
+        )
+        pass_language = re.compile(r"\b(no|none)\s+(?:actionable\s+)?(?:issues|findings|concerns)\b", re.IGNORECASE)
+        for section in sections:
+            if self._is_atomic_comments_summary_section(section):
+                continue
+            title = str(section.get("title") or "Review")
+            sentences = [
+                sentence.strip(" -\t")
+                for sentence in re.split(r"(?<=[.!?])\s+|\n+", str(section.get("content") or ""))
+                if sentence.strip(" -\t")
+            ]
+            for sentence in sentences:
+                if pass_language.search(sentence) or not issue_language.search(sentence):
+                    continue
+                comments.append({
+                    "id": f"A{len(comments) + 1}",
+                    "location": "Target location not specified",
+                    "violated_rule": "Not found in provided reference material",
+                    "rule_evidence": "",
+                    "issue": sentence[:240],
+                    "comment": f"{title}: {sentence}",
+                    "suggested_resolution": "Update the target document to resolve this issue and provide objective supporting evidence.",
+                })
+        return comments
+
+    def _extract_json_value(self, text):
+        cleaned = str(text or "").strip().lstrip("\ufeff")
+        if not cleaned:
+            return None
+
+        candidates = [cleaned]
+        candidates.extend(
+            match.group(1).strip()
+            for match in re.finditer(r"```(?:json)?\s*(.*?)```", cleaned, re.IGNORECASE | re.DOTALL)
+        )
+        without_thinking = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+        if without_thinking and without_thinking not in candidates:
+            candidates.append(without_thinking)
+
+        for candidate in candidates:
+            decoded = self._decode_json_candidate(candidate)
+            if decoded is not None:
+                return decoded
+
+        decoder = json.JSONDecoder()
+        for candidate in candidates:
+            for index, character in enumerate(candidate):
+                if character not in "{[":
+                    continue
+                try:
+                    decoded, _ = decoder.raw_decode(candidate[index:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(decoded, str):
+                    decoded = self._decode_json_candidate(decoded)
+                if decoded is not None:
+                    return decoded
+        return None
+
+    def _decode_json_candidate(self, candidate):
+        value = candidate
+        for _ in range(3):
+            if not isinstance(value, str):
+                return value
+            try:
+                value = json.loads(value.strip())
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return value
+
+    def _format_review_value(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            nested = self._decode_json_candidate(value)
+            return self._format_review_value(nested) if nested is not None and nested != value else value.strip()
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, list):
+            blocks = []
+            for item in value:
+                formatted = self._format_review_value(item)
+                if formatted:
+                    blocks.append(formatted if "\n" in formatted else f"- {formatted}")
+            return "\n\n".join(blocks)
+        if isinstance(value, dict):
+            finding = self._format_structured_finding(value)
+            if finding:
+                return finding
+            lines = []
+            for key, item in value.items():
+                formatted = self._format_review_value(item)
+                if not formatted:
+                    continue
+                label = str(key).replace("_", " ").strip().capitalize()
+                lines.append(f"{label}: {formatted}" if "\n" not in formatted else f"{label}:\n{formatted}")
+            return "\n".join(lines)
+        return str(value)
+
+    def _format_structured_finding(self, finding):
+        finding_keys = {
+            "location", "issue", "problem", "violated_rule", "rule_violated", "applicable_rule",
+            "rule", "rule_evidence", "evidence", "comment", "details", "suggested_resolution",
+            "target_fix", "resolution", "fix",
+        }
+        if not finding_keys.intersection(finding):
+            return ""
+        fields = (
+            ("Location", finding.get("location")),
+            ("Rule violated", finding.get("violated_rule") or finding.get("rule_violated") or finding.get("applicable_rule") or finding.get("rule")),
+            ("Rule evidence", finding.get("rule_evidence") or finding.get("rule_reference")),
+            ("Issue", finding.get("issue") or finding.get("problem") or finding.get("title")),
+            ("Evidence", finding.get("evidence") or finding.get("comment") or finding.get("details")),
+            ("Target fix", finding.get("suggested_resolution") or finding.get("target_fix") or finding.get("resolution") or finding.get("fix")),
+        )
+        return "\n".join(
+            f"{label}: {self._format_review_value(item)}"
+            for label, item in fields
+            if item not in (None, "")
+        )
 
     def _extract_review_text(self, response):
         if not isinstance(response, dict):
@@ -1677,10 +2032,27 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
 
     def _extract_section_issue_blocks(self, content):
         issue_blocks = []
-        matches = list(re.finditer(r"(?im)^\s*(?:(?:[-*]|\d+[\).])\s*)?Location:\s*", content))
-        for index, match in enumerate(matches):
-            start = match.start()
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        field_matches = list(re.finditer(
+            r"(?im)^\s*(?:(?:[-*]|\d+[\).])\s*)?(Location|Issue):\s*",
+            content,
+        ))
+        block_starts = []
+        current_has_issue = False
+        for match in field_matches:
+            field_name = match.group(1).lower()
+            if field_name == "location":
+                block_starts.append(match.start())
+                line_end = content.find("\n", match.end())
+                line_end = len(content) if line_end < 0 else line_end
+                current_has_issue = bool(re.search(r"\bIssue:\s*", content[match.end():line_end], re.IGNORECASE))
+            elif not block_starts or current_has_issue:
+                block_starts.append(match.start())
+                current_has_issue = True
+            else:
+                current_has_issue = True
+
+        for index, start in enumerate(block_starts):
+            end = block_starts[index + 1] if index + 1 < len(block_starts) else len(content)
             block = content[start:end].strip()
             if not block:
                 continue
@@ -1692,6 +2064,9 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         first_line = lines[0] if lines else block
         location_text = ""
         issue_text = first_line
+        first_issue_match = re.match(r"(?i)(?:(?:[-*]|\d+[\).])\s*)?Issue:\s*(.+)$", first_line)
+        if first_issue_match:
+            issue_text = first_issue_match.group(1).strip()
         match = re.match(r"(?i)(?:(?:[-*]|\d+[\).])\s*)?Location:\s*(.+?)(?:\s+-\s+|\s+--\s+|\s+Issue:\s+)(.+)$", first_line)
         if match:
             location_text = match.group(1).strip()
@@ -1717,7 +2092,8 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             if re.match(r"(?i)issue:", line)
         ]
         evidence_lines = [
-            line for line in lines[1:]
+            re.sub(r"(?i)^(evidence|comment|details):\s*", "", line).strip()
+            for line in lines[1:]
             if not re.match(r"(?i)target fix:|suggested resolution:|rule violated:|violated rule:|applicable rule:|rule:|rule evidence:|reference evidence:|rule text:|issue:", line)
         ]
         fix_lines = [
@@ -1727,7 +2103,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         ]
 
         return {
-            "location": self._normalize_location_label(location_text),
+            "location": self._normalize_location_label(location_text) or "Target location not specified",
             "violated_rule": self._normalize_rule_label(" ".join(rule_lines)),
             "rule_evidence": " ".join(rule_evidence_lines).strip(),
             "issue": " ".join(issue_lines).strip() or issue_text,
@@ -1770,7 +2146,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         def replace_match(match):
             repeated_name = match.group(1).strip().lower()
             if repeated_name == document_name:
-                return "section not resolved"
+                return "section document-level content"
             return match.group(0)
 
         return re.sub(r"(?i)section\s+Document\s+([^|,]+)", replace_match, text, count=1)
@@ -1793,14 +2169,8 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             return f"The selected model {model} was not found locally. Pull it first with: ollama pull {model}."
         return f"The review request failed: {error_message}"
 
-    def _collect_reference_documents(self, d0178c_context, reference_document_entries=None):
-        documents = []
-        if d0178c_context.strip():
-            documents.append({"name": "DO-178C-context", "content": d0178c_context.strip()})
-
-        uploaded_documents, _ = self._extract_uploaded_documents(reference_document_entries or [], "reference")
-        documents.extend(uploaded_documents)
-
+    def _collect_reference_documents(self, reference_document_entries=None):
+        documents, _ = self._extract_uploaded_documents(reference_document_entries or [], "reference")
         return documents
 
     def _extract_uploaded_documents(self, entries, default_name):
@@ -1821,6 +2191,8 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
 
     def _extract_uploaded_document(self, entry, default_name):
         name = (entry.get("name") or default_name).strip() or default_name
+        document_id = str(entry.get("document_id") or "").strip()
+        document_metadata = {"document_id": document_id} if document_id else {}
         encoded_content = entry.get("data_base64") or ""
         if encoded_content:
             try:
@@ -1829,7 +2201,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
                 return None, f"{name} could not be decoded."
             content = self._extract_document_bytes(name, raw_content)
             if content:
-                return {"name": name, "content": content}, ""
+                return {"name": name, "content": content, **document_metadata}, ""
             return None, f"{name} could not be read as a supported document."
 
         content = (entry.get("content") or "").strip()
@@ -1837,7 +2209,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             suffix = Path(name).suffix.lower()
             if suffix in WORD_EXTENSIONS | EXCEL_EXTENSIONS:
                 return None, f"{name} is an Office document, but the upload did not include binary content. Re-add the file and try again."
-            return {"name": name, "content": content}, ""
+            return {"name": name, "content": content, **document_metadata}, ""
 
         return None, f"{name} did not contain readable text."
 
@@ -2096,23 +2468,21 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             content = (document.get("content") or "").strip()
             if not content:
                 continue
-            current_section = ""
+            current_section = "Document overview"
             explicit_pages = re.split(r"\f+", content)
             paragraph_counter = 0
 
             for page_content in explicit_pages:
-                paragraphs = [p.strip() for p in re.split(r"\n\s*\n", page_content) if p.strip()]
-                if not paragraphs and page_content.strip():
-                    paragraphs = [page_content.strip()]
+                paragraphs = self._split_document_blocks(page_content)
 
                 for paragraph in paragraphs:
                     paragraph_counter += 1
-                    if self._looks_like_section_heading(paragraph):
-                        current_section = paragraph
+                    section_heading = self._section_heading_label(paragraph)
+                    if section_heading:
+                        current_section = section_heading
 
-                    section_label = current_section or "not resolved"
-                    detail_label = self._location_detail_label(paragraph, paragraph_counter)
-                    location = f"{role_label}: {name} | section {section_label} | {detail_label}"
+                    detail_label = self._location_detail_label(paragraph, paragraph_counter, bool(section_heading))
+                    location = f"{role_label}: {name} | section {current_section} | {detail_label}"
                     if len(paragraph) > 1800:
                         sub_paragraphs = re.split(r"(?<=[.;:])\s+", paragraph)
                         for sub_paragraph in sub_paragraphs:
@@ -2122,25 +2492,75 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
                         chunks.append(f"[{location}] {paragraph}")
         return chunks
 
-    def _looks_like_section_heading(self, paragraph):
-        text = re.sub(r"\s+", " ", paragraph.strip())
-        if not text or len(text) > 120 or "\n" in paragraph.strip():
-            return False
-        if re.match(r"^Row\s+\d+:", text, re.IGNORECASE):
-            return False
-        if re.match(r"^(Worksheet|Sheet|Table|Section|Chapter|Appendix|Requirement|Requirements|Verification|Traceability|Scope|Purpose|Introduction|Conclusion|Summary):\s+\S+", text, re.IGNORECASE):
-            return True
-        if re.match(r"^([0-9]+(\.[0-9]+)*|[A-Z])[\).:\- ]+\S+", text):
-            return True
-        words = text.split()
-        if len(words) <= 8 and not re.search(r"[.;!?]$", text) and any(char.isupper() for char in text):
-            return True
-        return False
+    def _split_document_blocks(self, content):
+        blocks = []
+        for paragraph in re.split(r"\n\s*\n", content or ""):
+            lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+            if not lines:
+                continue
+            # DOCX, spreadsheet and structured-model extraction use a single newline
+            # between logical paragraphs/rows. Keeping each line distinct allows their
+            # headings to establish provenance for every following chunk.
+            blocks.extend(lines)
+        return blocks
 
-    def _location_detail_label(self, paragraph, paragraph_counter):
+    def _looks_like_section_heading(self, paragraph):
+        return bool(self._section_heading_label(paragraph))
+
+    def _section_heading_label(self, paragraph):
+        text = re.sub(r"\s+", " ", paragraph.strip())
+        if not text or len(text) > 160 or "\n" in paragraph.strip():
+            return ""
+        if re.match(r"^Row\s+[A-Za-z0-9_.-]+:", text, re.IGNORECASE):
+            return ""
+        if REQUIREMENT_ID_PATTERN.match(text) or re.search(r"\b(shall|must|should|will|may|can)\b", text, re.IGNORECASE):
+            return ""
+        if re.match(r"^[A-Za-z][A-Za-z0-9_.-]*\s*=", text):
+            return ""
+
+        markdown_match = re.match(r"^#{1,6}\s+(.+?)\s*#*$", text)
+        if markdown_match:
+            return markdown_match.group(1).strip().rstrip(":")
+
+        scade_header = re.match(r"^\[SCADE\s+([^\]]+?)\s+(?:structured model|document):", text, re.IGNORECASE)
+        if scade_header:
+            return f"SCADE {scade_header.group(1).upper()} structure"
+
+        numbered_match = re.match(
+            r"^((?:\d+(?:\.\d+)*|[A-Z])(?:[\).:\-]|\s))\s*(\S.+)$",
+            text,
+        )
+        if numbered_match and len(numbered_match.group(2).split()) <= 14 and not re.search(r"[;!?]$", text):
+            return text.rstrip(":")
+
+        known_heading = re.match(
+            r"^(Worksheet|Sheet|Table|Section|Chapter|Appendix|Requirements|Verification|Traceability|Scope|Purpose|Introduction|Conclusion|Summary|Overview|Definitions|References|Interfaces|Architecture|Design|Assumptions)(?:\s*:\s*|\s+)(\S.*)?$",
+            text,
+            re.IGNORECASE,
+        )
+        if known_heading:
+            return text.rstrip(":")
+
+        words = text.rstrip(":").split()
+        letters = [word for word in words if re.search(r"[A-Za-z]", word)]
+        is_uppercase = bool(letters) and text.upper() == text
+        is_title_case = bool(letters) and all(
+            word[0].isupper() or word.lower() in {"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to"}
+            for word in letters
+        )
+        if len(words) <= 12 and not re.search(r"[.;!?]$", text) and (is_uppercase or is_title_case or text.endswith(":")):
+            return text.rstrip(":")
+        return ""
+
+    def _location_detail_label(self, paragraph, paragraph_counter, is_heading=False):
+        if is_heading:
+            return "heading"
         row_match = re.match(r"^Row\s+([A-Za-z0-9_.-]+):", paragraph.strip(), re.IGNORECASE)
         if row_match:
             return f"row {row_match.group(1)}"
+        requirement_match = REQUIREMENT_ID_PATTERN.match(paragraph.strip())
+        if requirement_match:
+            return f"requirement {self._normalize_requirement_id(requirement_match.group(0))}"
         return f"paragraph {paragraph_counter}"
 
     def _build_complete_target_context(self, target_chunks):
@@ -2187,11 +2607,83 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         rounded_tokens = ((needed_tokens + 2047) // 2048) * 2048
         return max(OLLAMA_REVIEW_MIN_NUM_CTX, min(OLLAMA_REVIEW_MAX_NUM_CTX, rounded_tokens))
 
-    def _retrieve_relevant_chunks(self, chunks, skills_prompt, review_goal, comparison_text="", limit=8):
+    def _build_relevance_stepthrough(self, target_chunks, skills_prompt, review_goal, focus_limit=10):
+        """Build a bounded, section-diverse retrieval query before composing the review prompt."""
+        if not target_chunks:
+            base_query = " ".join([skills_prompt, review_goal]).strip()
+            return {
+                "query": base_query,
+                "comparison_text": "",
+                "focus_chunks": [],
+                "focus_locations": [],
+            }
+
+        ranked = self._score_retrieval_chunks(target_chunks, " ".join([skills_prompt, review_goal]))
+        selected = []
+        selected_indexes = set()
+        selected_sections = set()
+
+        def section_key(chunk):
+            header = re.match(r"^\[([^\]]+)\]", chunk or "")
+            location = header.group(1) if header else "Target location not specified"
+            section_match = re.search(r"\|\s*section\s+([^|]+)", location, re.IGNORECASE)
+            section = section_match.group(1).strip().lower() if section_match else location.lower()
+            source = location.split("|", 1)[0].strip().lower()
+            return f"{source}|{section}", location
+
+        # First cover distinct document sections, then fill remaining slots by relevance.
+        for _, index, chunk in ranked:
+            key, location = section_key(chunk)
+            if key in selected_sections:
+                continue
+            selected.append((index, chunk, location))
+            selected_indexes.add(index)
+            selected_sections.add(key)
+            if len(selected) >= focus_limit:
+                break
+        if len(selected) < focus_limit:
+            for _, index, chunk in ranked:
+                if index in selected_indexes:
+                    continue
+                _, location = section_key(chunk)
+                selected.append((index, chunk, location))
+                if len(selected) >= focus_limit:
+                    break
+
+        focus_chunks = [chunk for _, chunk, _ in selected]
+        focus_locations = [location for _, _, location in selected]
+        # Keep the search query bounded; complete target content is still supplied to the final reviewer.
+        comparison_text = "\n".join(chunk[:1200] for chunk in focus_chunks)
+        return {
+            "query": "\n".join([skills_prompt, review_goal, comparison_text]).strip(),
+            "comparison_text": comparison_text,
+            "focus_chunks": focus_chunks,
+            "focus_locations": focus_locations,
+        }
+
+    def _retrieve_relevant_chunks(self, chunks, skills_prompt, review_goal, comparison_text="", limit=8, focus_chunks=None):
         query = " ".join([skills_prompt, review_goal, comparison_text])
-        scored = self._score_retrieval_chunks(chunks, query)
+        scored = self._score_staged_retrieval_chunks(chunks, query, focus_chunks or [])
         ranked = [chunk for _, _, chunk in scored]
         return ranked[:limit] if ranked else chunks[: min(3, limit)]
+
+    def _score_staged_retrieval_chunks(self, chunks, query, focus_queries=None):
+        """Fuse the overall query with small per-section searches so one long section cannot dominate."""
+        base_scored = self._score_retrieval_chunks(chunks, query)
+        if not base_scored or not focus_queries:
+            return base_scored
+        score_by_index = {index: score for score, index, _ in base_scored}
+        candidate_pool = max(12, min(len(chunks), 48))
+        for focus_query in focus_queries:
+            for rank, (score, index, _) in enumerate(
+                self._score_retrieval_chunks(chunks, focus_query)[:candidate_pool]
+            ):
+                score_by_index[index] = score_by_index.get(index, 0.0) + max(0.0, score) * 0.45
+                score_by_index[index] += 0.12 / (rank + 1)
+        return sorted(
+            [(score_by_index.get(index, 0.0), index, chunk) for index, chunk in enumerate(chunks)],
+            key=lambda item: (-item[0], item[1]),
+        )
 
     def _score_retrieval_chunks(self, chunks, query):
         if not chunks:
@@ -2244,7 +2736,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
         scored.sort(key=lambda item: (-item[0], item[1]))
         return scored
 
-    def _retrieve_rag_chunks(self, query, limit=24):
+    def _retrieve_rag_chunks(self, query, limit=24, focus_queries=None):
         with RAG_LOCK:
             store = {
                 "embedding_model": RAG_STORE["embedding_model"],
@@ -2258,7 +2750,7 @@ class ASCSReviewerHandler(BaseHTTPRequestHandler):
             f"[RAG: {chunk['source']} | chunk {chunk['id']}] {chunk['content']}"
             for chunk in store["chunks"]
         ]
-        scored = self._score_retrieval_chunks(formatted, query)
+        scored = self._score_staged_retrieval_chunks(formatted, query, focus_queries or [])
         score_by_index = {index: score for score, index, _ in scored}
         has_dense_vectors = any(chunk.get("embedding") for chunk in store["chunks"])
         query_embedding = self._request_rag_query_embedding(

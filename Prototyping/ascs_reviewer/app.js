@@ -28,8 +28,8 @@ const reviewModeToggleBtn = document.getElementById('reviewModeToggleBtn');
 const reviewDocFileMode = document.getElementById('reviewDocFileMode');
 const reviewDocTextMode = document.getElementById('reviewDocTextMode');
 const ragStoreInput = document.getElementById('ragStoreInput');
-const ragDocumentsInput = document.getElementById('ragDocumentsInput');
 const ragStatus = document.getElementById('ragStatus');
+const chunkTokenDetails = document.getElementById('chunkTokenDetails');
 const ragEnabled = document.getElementById('ragEnabled');
 const ragScope = document.getElementById('ragScope');
 const benchmarkStatus = document.getElementById('benchmarkStatus');
@@ -53,6 +53,7 @@ const hostedContextLimit = document.getElementById('hostedContextLimit');
 const CONFIG_STORAGE_KEY = 'ascs-reviewer-config';
 const reviewDocuments = [];
 const referenceEntries = [];
+let indexedReferenceDocuments = [];
 let reviewSkills = [];
 let skillAnswerSets = {};
 let reviewInputMode = 'files';
@@ -64,7 +65,7 @@ let modelAccessMode = 'ollama';
 let hostedDetectedModelName = '';
 let preferredContextWindow = 32768;
 const benchmarkResults = new Map();
-const REQUIRED_SERVER_CAPABILITIES = ['context-window-v1', 'model-context-discovery-v1', 'hosted-model-v1', 'model-benchmark-v1', 'rag-store-v1'];
+const REQUIRED_SERVER_CAPABILITIES = ['context-window-v1', 'model-context-discovery-v1', 'hosted-model-v1', 'model-benchmark-v1', 'rag-store-v1', 'rag-document-lifecycle-v1', 'indexed-reference-workflow-v1', 'staged-retrieval-v1', 'chunk-token-count-v1'];
 
 function readConfig() {
   try {
@@ -86,7 +87,6 @@ function saveConfig() {
     selectedSkillId: skillSelect.value || preferredSkillId,
     skillAnswerSets,
     customPrompt: getCustomPrompt(),
-    d0178cContext: document.getElementById('d0178cContext').value,
     reviewDocumentText: document.getElementById('documentText').value,
     reviewInputMode,
     ragEnabled: ragEnabled.checked,
@@ -104,9 +104,6 @@ function saveConfig() {
 function applyConfig(config) {
   if (!config) {
     return;
-  }
-  if (typeof config.d0178cContext === 'string') {
-    document.getElementById('d0178cContext').value = config.d0178cContext;
   }
   if (typeof config.reviewDocumentText === 'string') {
     document.getElementById('documentText').value = config.reviewDocumentText;
@@ -436,20 +433,51 @@ function setCustomPrompt(customPrompt) {
 }
 
 function renderReferenceEntries() {
+  const selectedDocumentId = referenceEntries[getSelectedEntryIndex(referenceList, referenceEntries)]?.rag_document_id || '';
   referenceList.innerHTML = '';
   if (!referenceEntries.length) {
     const placeholder = document.createElement('option');
     placeholder.textContent = 'No reference documents selected';
     placeholder.disabled = true;
     referenceList.appendChild(placeholder);
+    renderChunkTokenDetails();
     return;
   }
   referenceEntries.forEach((entry, index) => {
     const option = document.createElement('option');
     option.value = String(index);
-    option.textContent = entry.name;
+    const tokenDetail = entry.rag_token_count ? `, ~${entry.rag_token_count.toLocaleString()} tokens` : '';
+    const indexedDetail = ` (indexed, ${entry.rag_chunk_count || 0} chunk(s)${tokenDetail})`;
+    option.textContent = `${entry.name}${indexedDetail}`;
+    if (entry.rag_document_id === selectedDocumentId) option.selected = true;
     referenceList.appendChild(option);
   });
+  if (referenceList.selectedIndex < 0) referenceList.selectedIndex = 0;
+  renderChunkTokenDetails();
+}
+
+function renderChunkTokenDetails() {
+  chunkTokenDetails.innerHTML = '';
+  const selectedIndex = getSelectedEntryIndex(referenceList, referenceEntries);
+  const entry = selectedIndex >= 0 ? referenceEntries[selectedIndex] : null;
+  const documentInfo = indexedReferenceDocuments.find((document) => document.document_id === entry?.rag_document_id);
+  if (!documentInfo || !Array.isArray(documentInfo.chunks) || !documentInfo.chunks.length) {
+    chunkTokenDetails.textContent = referenceEntries.length
+      ? 'Token details are not available for this reference.'
+      : 'Select an indexed reference to see its per-chunk token counts.';
+    return;
+  }
+  const heading = document.createElement('strong');
+  heading.textContent = `${documentInfo.name}: ${documentInfo.chunk_count} chunk(s), ~${Number(documentInfo.token_count || 0).toLocaleString()} tokens total`;
+  const list = document.createElement('ol');
+  list.className = 'chunk-token-list';
+  documentInfo.chunks.forEach((chunk, index) => {
+    const item = document.createElement('li');
+    const chunkLabel = chunk.id || `chunk-${index + 1}`;
+    item.textContent = `${chunkLabel}: ~${Number(chunk.token_count || 0).toLocaleString()} tokens`;
+    list.appendChild(item);
+  });
+  chunkTokenDetails.append(heading, list);
 }
 
 function setReviewInputMode(mode) {
@@ -848,6 +876,8 @@ function readFileAsDocument(file) {
 }
 
 function renderRagStatus(data) {
+  indexedReferenceDocuments = Array.isArray(data?.documents) ? data.documents : [];
+  syncRagReferenceEntries(data);
   if (!data?.loaded) {
     ragStatus.textContent = 'No retrieval knowledge is loaded.';
     return;
@@ -855,7 +885,40 @@ function renderRagStatus(data) {
   const vectorDetail = data.vector_chunk_count
     ? ` ${data.vector_chunk_count} chunk(s) have ${data.dimensions || 'unknown'}-dimension vectors${data.embedding_model ? ` from ${data.embedding_model}` : ''}.`
     : '';
-  ragStatus.textContent = `${data.name || 'Knowledge store'}: ${data.chunk_count || 0} chunk(s) across ${data.source_count || 0} source(s). Retrieval: ${data.retrieval_mode}.${vectorDetail}`;
+  ragStatus.textContent = `${data.name || 'Reference index'}: ${data.chunk_count || 0} chunk(s), ~${Number(data.token_count || 0).toLocaleString()} tokens across ${data.source_count || 0} source(s). Retrieval: ${data.retrieval_mode}.${vectorDetail}`;
+}
+
+function syncRagReferenceEntries(data) {
+  const indexedDocuments = Array.isArray(data?.documents) ? data.documents : [];
+  const activeIds = new Set(indexedDocuments.map((document) => String(document.document_id || '')).filter(Boolean));
+
+  for (let index = referenceEntries.length - 1; index >= 0; index -= 1) {
+    const entry = referenceEntries[index];
+    if (!entry.rag_document_id || activeIds.has(entry.rag_document_id)) continue;
+    referenceEntries.splice(index, 1);
+  }
+
+  indexedDocuments.forEach((document) => {
+    const documentId = String(document.document_id || '').trim();
+    if (!documentId) return;
+    let entry = referenceEntries.find((candidate) => candidate.rag_document_id === documentId);
+    if (!entry) {
+      entry = referenceEntries.find((candidate) => !candidate.rag_document_id && candidate.name === document.name);
+    }
+    if (!entry) {
+      entry = { name: document.name || 'Knowledge document' };
+      referenceEntries.push(entry);
+    }
+    entry.rag_document_id = documentId;
+    entry.rag_chunk_count = Number(document.chunk_count) || 0;
+    entry.rag_token_count = Number(document.token_count) || 0;
+  });
+  renderReferenceEntries();
+}
+
+function createRagDocumentId() {
+  if (globalThis.crypto?.randomUUID) return `browser-${globalThis.crypto.randomUUID()}`;
+  return `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 async function refreshRagStatus() {
@@ -886,32 +949,15 @@ async function handleRagStoreSelection(event) {
   }
 }
 
-async function handleRagDocumentSelection(event) {
-  const files = Array.from(event.target.files || []);
-  if (!files.length) return;
-  ragStatus.textContent = `Indexing ${files.length} knowledge document(s)...`;
-  try {
-    const documents = await Promise.all(files.map(readFileAsDocument));
-    const data = await fetchJson('/api/rag/load', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Knowledge documents', documents, append: true }),
-    });
-    if (data.error) throw new Error(data.error);
-    renderRagStatus(data);
-  } catch (error) {
-    ragStatus.textContent = featureErrorMessage(error, 'Knowledge indexing');
-  } finally {
-    event.target.value = '';
-  }
-}
-
 async function clearRagKnowledge() {
-  ragStatus.textContent = 'Clearing retrieval knowledge...';
+  ragStatus.textContent = 'Clearing indexed references...';
   try {
-    renderRagStatus(await fetchJson('/api/rag/clear', { method: 'POST' }));
+    const data = await fetchJson('/api/rag/clear', { method: 'POST' });
+    referenceEntries.splice(0, referenceEntries.length);
+    renderRagStatus(data);
+    documentStatus.textContent = 'Cleared all reference documents and their associated chunks.';
   } catch (error) {
-    ragStatus.textContent = featureErrorMessage(error, 'Clear knowledge');
+    ragStatus.textContent = featureErrorMessage(error, 'Clear references');
   }
 }
 
@@ -924,11 +970,27 @@ async function handleFileSelection(event) {
   try {
     const docs = await Promise.all(files.map(readFileAsDocument));
     const addedEntries = docs.filter((doc) => !referenceEntries.some((entry) => entry.name === doc.name));
-    addedEntries.forEach((doc) => {
-      referenceEntries.push(doc);
+    if (!addedEntries.length) {
+      documentStatus.textContent = 'Those reference files are already indexed.';
+      return;
+    }
+    addedEntries.forEach((document) => {
+      document.document_id = createRagDocumentId();
     });
-    renderReferenceEntries();
-    documentStatus.textContent = `Added ${addedEntries.length} file(s) to the reference list.`;
+    documentStatus.textContent = `Chunking and indexing ${addedEntries.length} reference document(s)...`;
+    ragStatus.textContent = `Vectorising ${addedEntries.length} reference document(s)...`;
+    const data = await fetchJson('/api/rag/load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Indexed reference documents', documents: addedEntries, append: true }),
+    });
+    if (data.error) throw new Error(data.error);
+    addedEntries.forEach((document) => {
+      document.rag_document_id = document.document_id;
+      referenceEntries.push(document);
+    });
+    renderRagStatus(data);
+    documentStatus.textContent = `Added and indexed ${addedEntries.length} reference document(s). Select one to inspect token counts.`;
   } catch (error) {
     documentStatus.textContent = error.message;
   } finally {
@@ -957,15 +1019,33 @@ async function handleReviewDocumentSelection(event) {
   }
 }
 
-function removeSelectedReference() {
+async function removeSelectedReference() {
   const selectedIndex = getSelectedEntryIndex(referenceList, referenceEntries);
   if (selectedIndex < 0) {
     documentStatus.textContent = 'Select an entry to remove.';
     return;
   }
-  const removedEntry = referenceEntries.splice(selectedIndex, 1)[0];
-  renderReferenceEntries();
-  documentStatus.textContent = `Removed ${removedEntry?.name || 'reference entry'}.`;
+  const removedEntry = referenceEntries[selectedIndex];
+  try {
+    let ragData = null;
+    if (removedEntry.rag_document_id) {
+      documentStatus.textContent = `Removing ${removedEntry.name} and its retrieval chunks...`;
+      ragData = await fetchJson('/api/rag/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document_ids: [removedEntry.rag_document_id] }),
+      });
+      if (ragData.error) throw new Error(ragData.error);
+    }
+    const currentIndex = referenceEntries.indexOf(removedEntry);
+    if (currentIndex >= 0) referenceEntries.splice(currentIndex, 1);
+    if (ragData) renderRagStatus(ragData);
+    else renderReferenceEntries();
+    const chunkDetail = ragData ? ` and ${ragData.removed_chunk_count || 0} associated retrieval chunk(s)` : '';
+    documentStatus.textContent = `Removed ${removedEntry?.name || 'reference entry'}${chunkDetail}.`;
+  } catch (error) {
+    documentStatus.textContent = featureErrorMessage(error, 'Reference removal');
+  }
 }
 
 function removeSelectedReviewDocument() {
@@ -987,8 +1067,6 @@ function buildReviewPayload() {
     context_window: Number(contextWindow.value),
     prompt_mode: promptMode,
     document_text: document.getElementById('documentText').value,
-    d0178c_context: document.getElementById('d0178cContext').value,
-    reference_documents: referenceEntries.filter((entry) => entry.content || entry.data_base64),
     rag: {
       enabled: ragEnabled.checked,
       max_chunks: Number(ragScope.value) || 24,
@@ -1024,15 +1102,21 @@ async function runReview() {
       reviewOutput.textContent = `Review failed: ${data.error}`;
       return;
     }
-    const reviewResult = data.review_result || { summary: data.review || 'No review generated.', sections: [], atomic_comments: [] };
+    const reviewResult = normalizeReviewResultForDisplay(data.review_result || data.review || 'No review generated.');
     window.latestReviewResult = reviewResult;
     const reviewMethod = data.skill_name ? ` using ${data.skill_name}` : '';
     const retrievalMethod = data.retrieval
       ? `; selected ${data.retrieval.selected_chunks || 0} of ${data.retrieval.available_chunks || 0} available knowledge chunk(s)`
       : '';
+    const relevanceMethod = data.retrieval?.relevance_stepthrough
+      ? ` after scanning ${data.retrieval.relevance_stepthrough.target_chunks_scanned || 0} target chunk(s) and focusing ${data.retrieval.relevance_stepthrough.focus_chunks || 0}`
+      : '';
+    const atomicRepairMethod = data.atomic_comment_repair?.source
+      ? `; recovered ${data.atomic_comment_repair.comment_count || 0} atomic comment(s) using ${data.atomic_comment_repair.source}`
+      : '';
     const providerMethod = data.provider_mode === 'hosted' ? 'hosted model' : 'local Ollama';
     const contextLabel = data.context_window ? ` using ${(data.context_window / 1024).toFixed(0)}K context` : '';
-    reviewStatus.textContent = `Review completed with ${data.model} via ${providerMethod}${contextLabel}${reviewMethod} across ${data.source_count || 0} source document(s)${retrievalMethod}`;
+    reviewStatus.textContent = `Review completed with ${data.model} via ${providerMethod}${contextLabel}${reviewMethod} across ${data.source_count || 0} source document(s)${retrievalMethod}${relevanceMethod}${atomicRepairMethod}`;
     renderReviewOutput(reviewResult);
     if (data.provider_mode !== 'hosted') {
       refreshModels();
@@ -1167,6 +1251,123 @@ function renderTraceLinks(title, links) {
   return `<h3>${escapeHtml(title)}</h3><pre class="trace-copy-block">${escapeHtml(lines.join('\n'))}</pre>`;
 }
 
+function parseStructuredReviewJson(value) {
+  if (typeof value !== 'string') return value;
+  const text = value.trim().replace(/^\uFEFF/, '');
+  const candidates = [text];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) candidates.push(fenced[1].trim());
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(text.slice(firstBrace, lastBrace + 1));
+  for (const candidate of candidates) {
+    let parsed = candidate;
+    for (let attempt = 0; attempt < 3 && typeof parsed === 'string'; attempt += 1) {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch (error) {
+        parsed = null;
+        break;
+      }
+    }
+    if (parsed && typeof parsed === 'object') return parsed;
+  }
+  return value;
+}
+
+function formatReviewDisplayValue(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'number') return String(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const formatted = formatReviewDisplayValue(item);
+      if (!formatted) return '';
+      return formatted.includes('\n') ? formatted : `- ${formatted}`;
+    }).filter(Boolean).join('\n\n');
+  }
+  if (typeof value === 'object') {
+    const structuredFinding = formatStructuredFindingForDisplay(value);
+    if (structuredFinding) return structuredFinding;
+    return Object.entries(value).map(([key, item]) => {
+      const label = key.replace(/_/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
+      const formatted = formatReviewDisplayValue(item);
+      return formatted.includes('\n') ? `${label}:\n${formatted}` : `${label}: ${formatted}`;
+    }).filter((line) => !line.endsWith(': ')).join('\n');
+  }
+  return String(value);
+}
+
+function formatStructuredFindingForDisplay(value) {
+  const findingKeys = ['location', 'issue', 'problem', 'violated_rule', 'rule_violated', 'rule', 'evidence', 'comment', 'suggested_resolution', 'target_fix', 'resolution', 'fix'];
+  if (!findingKeys.some((key) => Object.hasOwn(value, key))) return '';
+  const fields = [
+    ['Location', value.location],
+    ['Rule violated', value.violated_rule || value.rule_violated || value.applicable_rule || value.rule],
+    ['Rule evidence', value.rule_evidence || value.rule_reference],
+    ['Issue', value.issue || value.problem || value.title],
+    ['Evidence', value.evidence || value.comment || value.details],
+    ['Target fix', value.suggested_resolution || value.target_fix || value.resolution || value.fix],
+  ];
+  return fields.filter(([, item]) => item !== null && item !== undefined && item !== '')
+    .map(([label, item]) => `${label}: ${formatReviewDisplayValue(item)}`)
+    .join('\n');
+}
+
+function normalizeReviewResultForDisplay(value) {
+  let result = parseStructuredReviewJson(value);
+  if (Array.isArray(result)) {
+    const issueKeys = ['issue', 'problem', 'comment', 'location', 'suggested_resolution', 'target_fix'];
+    const containsComments = result.some((item) => item && typeof item === 'object' && issueKeys.some((key) => Object.hasOwn(item, key)));
+    result = containsComments
+      ? { summary: 'Review completed.', atomic_comments: result }
+      : { summary: 'Review completed.', sections: result };
+  }
+  if (!result || typeof result !== 'object') {
+    const text = formatReviewDisplayValue(result || value || 'No review generated.');
+    return { summary: text, sections: [{ title: 'Review', content: text }], atomic_comments: [] };
+  }
+  for (const key of ['review_result', 'review', 'result', 'output']) {
+    if (result[key] && typeof result[key] === 'object' && !result.summary && !result.sections) {
+      result = result[key];
+      break;
+    }
+  }
+  let sections = result.sections || result.review_sections || [];
+  if (!Array.isArray(sections) && sections && typeof sections === 'object') {
+    sections = Object.entries(sections).map(([title, content]) => ({ title, content }));
+  }
+  if (!Array.isArray(sections)) sections = sections ? [sections] : [];
+  sections = sections.map((section, index) => {
+    if (!section || typeof section !== 'object' || Array.isArray(section)) {
+      return { title: `Review section ${index + 1}`, content: formatReviewDisplayValue(section) };
+    }
+    const content = section.content ?? section.findings ?? section.issues ?? section.assessment ?? section.text ?? '';
+    return {
+      title: formatReviewDisplayValue(section.title || section.name || `Review section ${index + 1}`),
+      content: formatReviewDisplayValue(content),
+    };
+  });
+  let comments = result.atomic_comments || result.atomicComments || result.comments || result.findings || [];
+  if (!Array.isArray(comments) && comments && typeof comments === 'object') comments = Object.values(comments);
+  if (!Array.isArray(comments)) comments = comments ? [comments] : [];
+  comments = comments.filter((comment) => comment && typeof comment === 'object').map((comment, index) => ({
+    id: formatReviewDisplayValue(comment.id || `A${index + 1}`),
+    location: formatReviewDisplayValue(comment.location || ''),
+    violated_rule: formatReviewDisplayValue(comment.violated_rule || comment.rule_violated || comment.rule || ''),
+    rule_evidence: formatReviewDisplayValue(comment.rule_evidence || comment.rule_reference || ''),
+    issue: formatReviewDisplayValue(comment.issue || comment.title || 'Issue'),
+    comment: formatReviewDisplayValue(comment.comment || comment.evidence || comment.details || ''),
+    suggested_resolution: formatReviewDisplayValue(comment.suggested_resolution || comment.target_fix || comment.resolution || ''),
+  }));
+  return {
+    summary: formatReviewDisplayValue(result.summary || result.overall_assessment || result.executive_summary || 'Review completed.'),
+    sections,
+    atomic_comments: comments,
+  };
+}
+
 function buildReviewText(reviewResult) {
   const sections = (reviewResult?.sections || []).map((section) => `## ${section.title}\n${normalizeIndentedIssues(section.content || '')}`).join('\n\n');
   const comments = (reviewResult?.atomic_comments || []).map((comment) => {
@@ -1190,9 +1391,10 @@ function normalizeIndentedIssues(content) {
       insideIssue = false;
       return '';
     }
-    if (/^(?:[-*]\s*)?Location:/i.test(trimmed)) {
+    if (/^(?:(?:[-*]|\d+[\).])\s*)?(?:Location|Issue):/i.test(trimmed)) {
       insideIssue = true;
-      return `  ${stripPageFromLocation(trimmed.replace(/^[-*]\s*/, ''))}`;
+      const fieldLine = trimmed.replace(/^(?:[-*]|\d+[\).])\s*/, '');
+      return `  ${/^Location:/i.test(fieldLine) ? stripPageFromLocation(fieldLine) : fieldLine}`;
     }
     if (insideIssue) {
       return `    ${trimmed}`;
@@ -1203,15 +1405,30 @@ function normalizeIndentedIssues(content) {
 
 function splitSectionIssueBlocks(content) {
   const text = normalizeIndentedIssues(content || '');
-  const matches = Array.from(text.matchAll(/(^|\n)\s*(?:(?:[-*]|\d+[\).])\s*)?Location:/gi));
-  if (!matches.length) {
+  const fieldMatches = Array.from(text.matchAll(/(^|\n)\s*(?:(?:[-*]|\d+[\).])\s*)?(Location|Issue):/gi));
+  const blockStarts = [];
+  let currentHasIssue = false;
+  fieldMatches.forEach((match) => {
+    const start = match.index + match[1].length;
+    if (match[2].toLowerCase() === 'location') {
+      blockStarts.push(start);
+      const lineEnd = text.indexOf('\n', start);
+      const line = text.slice(start, lineEnd < 0 ? text.length : lineEnd);
+      currentHasIssue = /\bIssue:\s*/i.test(line.replace(/^\s*Location:\s*/i, ''));
+    } else if (!blockStarts.length || currentHasIssue) {
+      blockStarts.push(start);
+      currentHasIssue = true;
+    } else {
+      currentHasIssue = true;
+    }
+  });
+  if (!blockStarts.length) {
     return { intro: text.trim(), issues: [] };
   }
 
-  const intro = text.slice(0, matches[0].index).trim();
-  const issues = matches.map((match, index) => {
-    const start = match.index + match[1].length;
-    const end = index + 1 < matches.length ? matches[index + 1].index : text.length;
+  const intro = text.slice(0, blockStarts[0]).trim();
+  const issues = blockStarts.map((start, index) => {
+    const end = index + 1 < blockStarts.length ? blockStarts[index + 1] : text.length;
     return text.slice(start, end).trim();
   }).filter(Boolean);
   return { intro, issues };
@@ -1223,8 +1440,8 @@ function renderSectionContent(content) {
   if (parsed.intro) {
     parts.push(`<div class="review-section-content">${escapeHtml(parsed.intro)}</div>`);
   }
-  parsed.issues.forEach((issue) => {
-    parts.push(renderFindingBlock(issue));
+  parsed.issues.forEach((issue, index) => {
+    parts.push(renderFindingBlock(issue, `Finding ${index + 1}`));
   });
   if (!parts.length) {
     parts.push('<div class="review-section-content">No content.</div>');
@@ -1235,9 +1452,11 @@ function renderSectionContent(content) {
 function parseIssueFields(block) {
   const fields = {};
   String(block || '').split(/\r?\n/).forEach((line) => {
-    const match = line.trim().match(/^(Location|Rule violated|Rule evidence|Issue|Evidence|Target fix):\s*(.*)$/i);
+    const match = line.trim().match(/^(Location|Rule violated|Rule evidence|Issue|Evidence|Comment|Details|Target fix|Suggested resolution):\s*(.*)$/i);
     if (match) {
-      const key = match[1].toLowerCase().replace(/\s+/g, '_');
+      let key = match[1].toLowerCase().replace(/\s+/g, '_');
+      if (key === 'comment' || key === 'details') key = 'evidence';
+      if (key === 'suggested_resolution') key = 'target_fix';
       fields[key] = fields[key] ? `${fields[key]} ${match[2].trim()}` : match[2].trim();
     } else if (line.trim() && fields.evidence) {
       fields.evidence += ` ${line.trim()}`;
@@ -1246,20 +1465,44 @@ function parseIssueFields(block) {
   return fields;
 }
 
-function renderFindingBlock(block) {
+function renderFindingBlock(block, itemLabel = 'Finding') {
   const fields = parseIssueFields(block);
   if (!fields.issue && !fields.location) {
-    return `<pre class="review-issue-block">${escapeHtml(block)}</pre>`;
+    fields.issue = itemLabel;
+    fields.evidence = block;
   }
-  return renderFindingCard(fields);
+  return renderFindingCard(fields, itemLabel);
 }
 
-function renderFindingCard(fields) {
+function buildFindingCopyText(fields) {
+  return [
+    fields.issue ? `Issue: ${fields.issue}` : '',
+    fields.location ? `Location: ${stripPageFromLocation(fields.location)}` : '',
+    fields.rule_violated ? `Rule violated: ${fields.rule_violated}` : '',
+    fields.rule_evidence ? `Rule evidence: ${fields.rule_evidence}` : '',
+    fields.evidence ? `Comment: ${fields.evidence.replace(/^Evidence:\s*/i, '')}` : '',
+    fields.target_fix ? `Suggested resolution: ${fields.target_fix}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function copyIcon(copied = false) {
+  if (copied) {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>';
+  }
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg>';
+}
+
+function renderFindingCard(fields, itemLabel = 'Comment') {
+  const copyText = encodeURIComponent(buildFindingCopyText(fields));
   return `
     <article class="finding-card">
       <div class="finding-card-head">
-        <strong>${escapeHtml(fields.issue || 'Issue')}</strong>
-        <span class="finding-location">${escapeHtml(stripPageFromLocation(fields.location || 'Not specified'))}</span>
+        <div class="finding-card-heading">
+          <span class="finding-item-label">${escapeHtml(itemLabel)}</span>
+          <strong>${escapeHtml(fields.issue || 'Issue')}</strong>
+          <span class="finding-location">${escapeHtml(stripPageFromLocation(fields.location || 'Not specified'))}</span>
+        </div>
+        <button class="finding-copy-button" type="button" data-copy-comment="${escapeHtml(copyText)}" title="Copy this comment" aria-label="Copy this comment">${copyIcon()}</button>
       </div>
       <div class="finding-meta">
         <span><b>Rules</b> ${escapeHtml(fields.rule_violated || 'Not specified')}</span>
@@ -1269,6 +1512,45 @@ function renderFindingCard(fields) {
       ${fields.target_fix ? `<div class="finding-fix"><b>Fix</b> ${escapeHtml(fields.target_fix)}</div>` : ''}
     </article>
   `;
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  textArea.setAttribute('readonly', '');
+  textArea.style.position = 'fixed';
+  textArea.style.opacity = '0';
+  document.body.appendChild(textArea);
+  textArea.select();
+  const copied = document.execCommand('copy');
+  textArea.remove();
+  if (!copied) throw new Error('The browser did not permit clipboard access.');
+}
+
+async function handleReviewOutputClick(event) {
+  const button = event.target.closest?.('.finding-copy-button');
+  if (!button || !reviewOutput.contains(button)) return;
+  try {
+    await copyTextToClipboard(decodeURIComponent(button.dataset.copyComment || ''));
+    button.classList.add('finding-copy-button-copied');
+    button.innerHTML = copyIcon(true);
+    button.title = 'Copied';
+    button.setAttribute('aria-label', 'Comment copied');
+    reviewStatus.textContent = 'Individual review comment copied to the clipboard.';
+    window.setTimeout(() => {
+      if (!button.isConnected) return;
+      button.classList.remove('finding-copy-button-copied');
+      button.innerHTML = copyIcon();
+      button.title = 'Copy this comment';
+      button.setAttribute('aria-label', 'Copy this comment');
+    }, 1600);
+  } catch (error) {
+    reviewStatus.textContent = `Unable to copy comment: ${error.message}`;
+  }
 }
 
 function escapeHtml(value) {
@@ -1309,10 +1591,11 @@ function buildExportFileName() {
 }
 
 function renderReviewOutput(reviewResult) {
+  reviewResult = normalizeReviewResultForDisplay(reviewResult);
   const sections = reviewResult?.sections || [];
   const comments = reviewResult?.atomic_comments || [];
   if (!sections.length && !comments.length) {
-    reviewOutput.innerHTML = `<div class="small">${reviewResult?.summary || 'No review output available.'}</div>`;
+    reviewOutput.innerHTML = `<div class="small">${escapeHtml(reviewResult?.summary || 'No review output available.')}</div>`;
     return;
   }
 
@@ -1322,7 +1605,7 @@ function renderReviewOutput(reviewResult) {
     html.push(`<section class="review-section-box"><h3>${escapeHtml(section.title)}</h3>${renderSectionContent(section.content || 'No content.')}</section>`);
   });
   if (comments.length) {
-    html.push(`<section class="review-section-box atomic-comments-box"><h3>Atomic comments</h3><div class="atomic-comment-list">${comments.map((comment) => {
+    html.push(`<section class="review-section-box atomic-comments-box"><h3>Atomic comments</h3><div class="atomic-comment-list">${comments.map((comment, index) => {
       const rule = comment.violated_rule || 'Not found in provided reference material';
       return renderFindingCard({
         issue: `${comment.id}: ${comment.issue}`,
@@ -1331,7 +1614,7 @@ function renderReviewOutput(reviewResult) {
         rule_evidence: comment.rule_evidence || '',
         evidence: comment.comment || 'N/A',
         target_fix: comment.suggested_resolution || 'N/A',
-      });
+      }, `Comment ${index + 1}`);
     }).join('')}</div></section>`);
   }
   reviewOutput.innerHTML = html.join('');
@@ -1444,8 +1727,8 @@ document.getElementById('reviewBtn').addEventListener('click', runReview);
 document.getElementById('traceabilityBtn').addEventListener('click', runTraceabilityAnalysis);
 document.getElementById('downloadReviewTextBtn').addEventListener('click', () => exportReview());
 document.getElementById('downloadTraceabilityBtn').addEventListener('click', exportTraceabilityAnalysis);
+reviewOutput.addEventListener('click', handleReviewOutputClick);
 document.getElementById('loadRagStoreBtn').addEventListener('click', () => ragStoreInput.click());
-document.getElementById('addRagDocumentsBtn').addEventListener('click', () => ragDocumentsInput.click());
 document.getElementById('clearRagBtn').addEventListener('click', clearRagKnowledge);
 addReferenceBtn.addEventListener('click', () => fileInput.click());
 removeReferenceBtn.addEventListener('click', removeSelectedReference);
@@ -1468,7 +1751,7 @@ modelSelect.addEventListener('change', () => {
 fileInput.addEventListener('change', handleFileSelection);
 reviewFileInput.addEventListener('change', handleReviewDocumentSelection);
 ragStoreInput.addEventListener('change', handleRagStoreSelection);
-ragDocumentsInput.addEventListener('change', handleRagDocumentSelection);
+referenceList.addEventListener('change', renderChunkTokenDetails);
 
 const savedConfig = readConfig();
 applyConfig(savedConfig);

@@ -1,0 +1,207 @@
+Summary
+The candidate artifact provides a detailed set of high-level requirements (HLRs) for the DCDS system. While the structure is generally comprehensive, several critical defects were identified concerning traceability completeness, adherence to design standards (especially regarding state management and interface definition), and clarity/consistency in defining operational constraints. Specifically, the allocation matrix requires verification that all HLRs are fully traced, and the interface definitions need stricter adherence to defined failure and initialization responses. The document also contains significant procedural warnings (e.g., 'AI REVIEW EXERCISE', 'UNCONTROLLED WHEN PRINTED') which must be managed in the final controlled version.
+
+## Scope and obligations
+The review covered the scope, applicability, assumptions, dependencies, intended use, and all supplied standards. The document makes several explicit assumptions (e.g., treating SCADE Display, SCADE Suite logic, and platform gateway as a single C2 feature) which must be rigorously validated against system architecture documents not provided here. The allocation assumption regarding the external SRATS template is noted but requires confirmation of the data structure used in DCDS_C2_SRATS.xlsx.
+
+**Defects Found:**
+
+1. **Incomplete Scope Definition/Assumptions:** The document assumes that 'The SCADE Display model, SCADE Suite logic and platform gateway are treated as a single C2 feature for this candidate baseline' (DCDS_C2_High_Level_Requirements.docx | section 1. Purpose and scope | paragraph 22). This is a major architectural assumption that needs explicit verification against the system decomposition and interface control documents to ensure all components are accounted for in the safety analysis.
+2. **Missing Traceability Scope:** The document mentions allocation using 'DCDS_C2_SRATS.xlsx' (DCDS_C2_High_Level_Requirements.docx | section 1. Purpose and scope | paragraph 23), but the actual structure or content of this external spreadsheet is not provided, making verification of the allocation process impossible. This constitutes a dependency risk.
+
+**Non-applicable checks:** No specific plans or requirements were supplied to check against for general scope definition beyond the provided standards, which were addressed in other sections.
+
+## Correctness, completeness and clarity
+The review assessed every statement for correctness, completeness, necessity, clarity, atomicity, unambiguity, consistency, and feasible implementation. The requirements themselves are generally clear but suffer from ambiguity regarding state transitions and timing constraints.
+
+**Defects Found:**
+
+1. **Ambiguous State Transition Logic (HLR-C2-003):** HLR-C2-003 states: 'A selected command shall remain armed for 10 seconds after selection. It shall remain armed after an authority change provided the same operator is logged in.' The condition 'provided the same operator is logged in' is vague. Does this mean the user ID must match, or simply that the session remains active? This needs precise definition.
+2. **Inconsistent Timing Definition (HLR-C2-004 vs HLR-C2-005):** HLR-C2-004 specifies 'The panel shall indicate ACCEPTED within 3 seconds of receiving any positive acknowledgement from the vehicle.' HLR-C2-005 specifies that the command manager issues a send request on every 50 ms application cycle *until* an acknowledgement is received. The relationship between the 3-second display time and the continuous 50ms sending rate needs clarification to ensure the system doesn't violate the 3-second display requirement due to processing delays.
+3. **Ambiguous Command Authority Scope (HLR-C2-002):** HLR-C2-002 states: 'The panel should normally prevent command confirmation when command authority is NONE or the command link is LOST, unless the operator really needs to send one.' The phrase 'unless the operator really needs to send one' is non-technical, subjective, and must be replaced with a defined, objective condition (e.g., 'unless explicitly overridden by a supervisor role').
+4. **Incomplete Interface Definition for Command Link State:** The definition of command link states (CONNECTED, DEGRADED, LOST) lacks specific criteria for transitioning between these states, which is critical for implementing HLR-C2-002 and HLR-C2-010.
+5. **Lack of Atomicity in Requirement Grouping:** HLR-C2-007 ('Following a warm restart, the panel shall restore the last pending command and continue waiting for its acknowledgement.') combines two distinct functions (restoration and continuation of waiting). These should potentially be separated or clarified to define the exact state machine behavior upon restart.
+
+**Non-applicable checks:** The review covered all provided sections and requirements.
+
+## Safety, risk and failure behaviour
+The review assessed hazards, safety objectives, controls, assumptions, modes, invalid conditions, degraded behaviour, recovery, and safe failure response. Several critical safety concerns related to state management and failure handling were identified.
+
+**Defects Found:**
+
+1. **Missing Safe State Definition for Command Failure:** The requirements define behavior upon acknowledgement (ACCEPTED/REJECTED) but do not explicitly define the system's safe state or required operator feedback if the command link is LOST *and* the system cannot confirm the status of the last transmitted command. This violates the principle of making safety-significant behavior explicit.
+2. **Insufficient Handling of Stale Data (HLR-C2-008):** HLR-C2-008 states: 'The command status shall update reasonably quickly when vehicle state changes.' 'Reasonably quickly' is not a measurable, deterministic requirement. This must be quantified (e.g., within 100ms) and linked to the interface timing constraints.
+3. **Failure Mode for Command Confirmation:** The system relies on confirmation control (A second press anywhere). If the input mechanism fails (e.g., touch screen unresponsive), or if the command manager fails before processing the second press, the failure mode and resulting safe state are undefined. A clear fail-safe mechanism is required.
+4. **Lack of Defined Recovery Path for Authority Change:** HLR-C2-003 mentions remaining armed after an authority change. If the authority changes *and* the operator is logged out/session ends, the system must transition to a defined safe state (e.g., disabling all command transmission capability) rather than relying on vague conditions.
+
+**Non-applicable checks:** No specific hazard analysis or safety plan was provided for direct checking, but general safety principles were applied.
+
+## Interfaces and data
+The review focused on interface definitions, inputs, outputs, data types, ranges, units, validity, initialization, timing, dependencies, and failure semantics. The interface definition section (Rate, Initialization, etc.) is partially compliant but has significant gaps.
+
+**Defects Found:**
+
+1. **Incomplete Interface Definition (SDS-IF-001):** Several interface items lack required definitions. For example, `i_CommandLink` (DCDS_C2_High_Level_Requirements.docx | section Initialization | paragraph 60) is defined as an integer but lacks a valid range and explicit failure response definition beyond the general 'Failure response' heading.
+2. **Missing Failure Response for Boolean/Event:** For `i_AckPositive` (DCDS_C2_High_Level_Requirements.docx | section Initialization | paragraph 70), it is defined as an event, but the required action or failure response if the event fails to fire when expected is not specified.
+3. **Ambiguous Data Type/Unit for Command Authority:** The `i_Authority` (DCDS_C2_High_Level_Requirements.docx | section 5 Hz | paragraph 65) is defined as an enum, but the specific enumeration values and their corresponding meaning (e.g., what constitutes 'NONE' vs 'DEGRADED') are not fully detailed or linked to the operational context.
+4. **Missing Latency/Validity for Key Inputs:** Critical inputs like `i_AckPositive` and `i_CommandLink` need defined latency and validity periods, especially considering the 50ms application cycle rate (HLR-C2-005). The current definitions are insufficient for robust real-time design.
+
+**Non-applicable checks:** No specific interface definition document was provided to compare against, but general standards were applied.
+
+## Lifecycle, governance and configuration
+The review assessed lifecycle status, responsibilities, independence, approvals, change control, deviations, anomalies, baselines, and required records. The document contains multiple provisional markers.
+
+**Defects Found:**
+
+1. **Uncontrolled Status Markers:** The presence of 'UNCONTROLLED WHEN PRINTED' (DCDS_C2_High_Level_Requirements.docx | section 6. Candidate approval note | requirement DCDS-C2-HLR-001) and the overall status 'Revision P0 / Unapproved candidate' (DCDS_C2_High_Level_Requirements.docx | section Field | paragraph 11) indicates that the document is not in a controlled state for use, which is expected given the exercise nature but must be flagged as a governance risk if used prematurely.
+2. **Missing Approval Signatures/Roles:** While the section '6. Candidate approval note' exists, it lacks any defined roles, responsibilities, or required signatures (e.g., Safety Manager, System Architect) necessary to transition from 'P0 / Unapproved candidate' to an approved baseline.
+3. **Lack of Change Control Process Definition:** The document does not reference or define the process for managing changes to these high-level requirements once they are baselined, which is critical for controlled engineering use.
+
+**Non-applicable checks:** No specific change control plan was provided.
+
+## Traceability and cross-document consistency
+The review assessed forward and reverse traceability, complete allocation, derived content, orphan content, duplication, conflicts, and cross-reference integrity. The allocation matrix is the primary focus here.
+
+**Defects Found:**
+
+1. **Incomplete Allocation Coverage (HLR-C2-009):** HLR-C2-009 is present in the HLR section but has no corresponding entry in the SRAT or LLR sections, indicating a gap in the allocated/planned traceability chain.
+2. **Orphaned/Misallocated Requirement (SRAT-C2-003):** The requirement `SRAT-C2-003` is used to allocate HLR-C2-004 (DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 46) but is also listed as the source for HLR-C2-003 (DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 44). This suggests potential duplication or incorrect allocation mapping, requiring verification of which requirement is the true source.
+3. **Missing Traceability for HLR-C2-012:** HLR-C2-012 is defined but has no corresponding entry in the SRAT or LLR sections, indicating a gap in the allocated/planned traceability chain.
+4. **Inconsistent Allocation Mapping (HLR-C2-006):** HLR-C2-006 is traced to SRAT-C2-007, but the corresponding LLR entry is LLR-C2-006. This suggests a potential mismatch in numbering or scope between the allocated requirement and the planned low-level requirement.
+
+**Non-applicable checks:** The review covered all provided traceability sections.
+
+## Verification and objective evidence
+The review assessed acceptance criteria, verification methods, normal and robustness coverage, repeatability, objective evidence, tools, environments, and closure status. Verification is sparse.
+
+**Defects Found:**
+
+1. **Lack of Objective Acceptance Criteria:** The requirements are stated as functional goals (e.g., 'The panel shall indicate ACCEPTED within 3 seconds...'). However, the associated verification sections (TC-C2-XXX) do not provide objective acceptance criteria (e.g., specific pass/fail thresholds, measured values, or required test inputs). They only list the test case ID.
+2. **Insufficient Coverage for Failure Modes:** The requirements mandate handling degraded states and link loss (HLR-C2-002, HLR-C2-010), but the verification plan does not explicitly show dedicated test cases covering these failure modes (e.g., testing command transmission when authority is NONE AND link is LOST).
+3. **Ambiguity in Verification Scope:** The verification section headers list IDs (e.g., TC-C2-001) but do not specify the required test environment, tools, or necessary inputs/stimuli needed to execute the test case, making objective evidence generation difficult.
+
+**Non-applicable checks:** No specific verification plan document was provided.
+
+## Presentation and controlled use
+The review assessed structure, identifiers, terminology, tables, readability, spelling, grammar, revision information, and suitability for controlled engineering use. The document is generally well-structured but contains several procedural defects.
+
+**Defects Found:**
+
+1. **Inconsistent Terminology/Acronym Use:** The document uses 'DCDS' (SkyGuard Drone Control Display System) and 'PAN-C2' interchangeably or in close proximity without consistently defining which acronym refers to the primary system component being designed. Clarity is needed on whether DCDS *is* PAN-C2, or if one is a subsystem of the other.
+2. **Lack of Standardized Identifier Format:** While requirement IDs (HLR-C2-XXX) are used, the interface item identifiers (e.g., `i_CommandLink`) lack a consistent prefix or naming convention that ties them back to the system component they belong to, which is necessary for large-scale controlled engineering use.
+3. **Procedural Warning Overload:** The document contains multiple warnings related to its status ('AI REVIEW EXERCISE', 'UNCONTROLLED WHEN PRINTED', 'P0 / Unapproved candidate'). While these are noted, their presence suggests the document has not passed through the necessary formal review gates required for controlled use.
+
+**Non-applicable checks:** No specific style guide or terminology standard was provided.
+
+Atomic comments
+- A1: Major architectural assumption regarding component integration.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 1. Purpose and scope | paragraph 22
+  Rule violated: SDS-PRN-001 (Design shall make safety-significant behaviour explicit, deterministic and traceable)
+  Rule evidence: The design must explicitly define all components involved in safety-critical behavior.
+  The statement that 'SCADE Display model, SCADE Suite logic and platform gateway are treated as a single C2 feature' is a critical, high-level architectural assumption. This must be verified against the system decomposition and interface control documents (ICDs) to ensure all interfaces and failure modes between these components are accounted for in the safety analysis.
+  Suggested resolution: Add a mandatory reference to the System Architecture Document (SAD) or Interface Control Document (ICD) that validates this grouping, and explicitly list the assumed interfaces.
+
+- A2: Dependency on external, undefined traceability mechanism.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 1. Purpose and scope | paragraph 23
+  Rule violated: SDS-TRC-001 (Traceability shall be bidirectional from system-derived software requirements through design/model elements, generated or manual implementation, verification cases and results)
+  Rule evidence: All allocation mechanisms must be fully defined and traceable.
+  The document relies on an external spreadsheet (DCDS_C2_SRATS.xlsx) for allocation. Since this file is not provided, the process and structure of the allocation are unverified, creating a significant dependency risk for traceability completeness.
+  Suggested resolution: Either include the schema/sample data for DCDS_C2_SRATS.xlsx or define the required input/output format for the allocation process within the document.
+
+- A3: Ambiguous condition for remaining armed after authority change.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 44
+  Rule violated: SDS-PRN-001 (The design shall make safety-significant behaviour explicit, deterministic and traceable)
+  Rule evidence: Vague conditions must be replaced with objective, measurable criteria.
+  The condition 'provided the same operator is logged in' is non-deterministic. It needs to be defined precisely: does it mean matching User ID, or simply that the session state remains active? This ambiguity affects the safety logic of command arming.
+  Suggested resolution: Replace the vague phrase with a precise condition, such as 'provided the authenticated user ID remains unchanged and the session is active.'
+
+- A4: Potential conflict between continuous sending rate and display update time.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 46
+  Rule violated: SDS-PRN-001 (The design shall make safety-significant behaviour explicit, deterministic and traceable)
+  Rule evidence: Timing constraints must be consistent and non-contradictory.
+  HLR-C2-005 mandates sending requests every 50 ms until acknowledgement. HLR-C2-004 mandates indication within 3 seconds of positive acknowledgement. The interaction between the continuous, high-frequency send request and the final 3-second display window needs clarification to ensure the system meets both timing constraints without violating processing limits.
+  Suggested resolution: Clarify if the 3-second timer starts upon *receipt* of the positive acknowledgement or upon *display* of the acknowledgement. If it's a race condition, define the priority and maximum latency budget for the entire sequence.
+
+- A5: Use of subjective and non-technical language in a safety requirement.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 43
+  Rule violated: SDS-PRN-001 (The design shall make safety-significant behaviour explicit, deterministic and traceable)
+  Rule evidence: Subjective language must be replaced with objective criteria.
+  The phrase 'unless the operator really needs to send one' is subjective and cannot be verified or implemented deterministically. This must be replaced by a defined, objective condition (e.g., 'unless an explicit override command is issued by a designated supervisor role').
+  Suggested resolution: Rewrite the requirement to define the specific, measurable conditions under which command confirmation is permitted despite low authority or link loss.
+
+- A6: Missing definition of safe state upon command failure or link loss.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 47
+  Rule violated: SDS-PRN-001 (The design shall make safety-significant behaviour explicit, deterministic and traceable)
+  Rule evidence: Failure modes and safe states must be defined for all critical operations.
+  While acceptance/rejection colors are defined, the requirements do not specify the system's required safe state or operator feedback if a command fails to transmit, or if the link is lost *after* transmission but *before* confirmation. A clear fail-safe mechanism must be mandated.
+  Suggested resolution: Add a requirement defining the mandatory safe state (e.g., 'Upon confirmed failure of command transmission, the panel shall revert to a non-transmitting, warning state and require manual operator acknowledgment before any further attempts.')
+
+- A7: Non-quantifiable timing requirement ('reasonably quickly').
+  Location: DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 49
+  Rule violated: SDS-PRN-001 (The design shall make safety-significant behaviour explicit, deterministic and traceable)
+  Rule evidence: Vague timing descriptions must be quantified.
+  The term 'reasonably quickly' is non-deterministic and unacceptable for a safety-critical system. This must be replaced with a measurable time threshold (e.g., 'within 100 ms') derived from the system's performance budget.
+  Suggested resolution: Quantify the update rate, e.g., 'The command status shall update within $T_{update}$ milliseconds of receiving vehicle state change data.'
+
+- A8: Insufficient definition of destructive command transmission under link loss.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 3. High-level requirements | paragraph 51
+  Rule violated: SDS-PRN-006 (Robustness shall be designed at the boundary; impossible values, stale frames, missing acknowledgements and repeated commands are expected conditions)
+  Rule evidence: The system must handle all defined failure modes robustly.
+  While HLR-C2-010 defines the mechanism for transmitting a destructive command when the link is LOST, it does not specify the safety checks required *before* the operator confirms the double confirmation (e.g., confirming that the system has validated the current vehicle state and that the command is indeed destructive).
+  Suggested resolution: Add a requirement mandating a secondary validation step or confirmation prompt that explicitly warns the operator about the irreversible nature of the command before the final execution.
+
+- A9: Missing definition of required parameters for the 'Type / unit' field.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 4. External interface assumptions | paragraph 56
+  Rule violated: SDS-IF-001 (Every interface item shall define name, type, unit, valid range, resolution, rate, latency, source, validity, initialization and failure response)
+  Rule evidence: All interface items must be fully defined.
+  The section header 'Type / unit' implies that this information is critical for defining the interface, but the content provided does not define what constitutes a valid type or unit for all interfaces, making the section incomplete for controlled use.
+  Suggested resolution: Provide a mandatory list of acceptable data types and units used across all defined interfaces (e.g., 'Time: seconds', 'Boolean: true/false').
+
+- A10: Incomplete definition of the i_CommandLink interface item.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 4. External interface assumptions | paragraph 60
+  Rule violated: SDS-IF-001 (Every interface item shall define name, type, unit, valid range, resolution, rate, latency, source, validity, initialization and failure response)
+  Rule evidence: All interface items must be fully defined.
+  The `i_CommandLink` is defined as an integer but lacks a specified valid range (e.g., 0 to N), and the failure response mechanism for this critical link state needs explicit definition beyond just the general 'Failure response' heading.
+  Suggested resolution: Specify the valid range for the integer type and define the required system action (e.g., 'If i_CommandLink fails, the system shall transition to a degraded mode and display a persistent warning.')
+
+- A11: Missing failure response for the i_AckPositive event.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 4. External interface assumptions | paragraph 70
+  Rule violated: SDS-IF-001 (Every interface item shall define name, type, unit, valid range, resolution, rate, latency, source, validity, initialization and failure response)
+  Rule evidence: All interface items must be fully defined.
+  The `i_AckPositive` is an event type. The failure response (e.g., if the expected positive acknowledgement does not arrive within a defined timeout) must be specified to ensure robustness, especially when relying on this signal for command confirmation.
+  Suggested resolution: Define the required system behavior upon timeout or failure of the i_AckPositive event.
+
+- A12: HLR-C2-009 is defined but lacks corresponding allocation (SRAT) and planning (LLR) entries.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 5. Allocation and trace | HLR-C2-009
+  Rule violated: SDS-TRC-001 (Traceability shall be bidirectional from system-derived software requirements through design/model elements, generated or manual implementation, verification cases and results)
+  Rule evidence: All defined high-level requirements must be allocated and planned for verification.
+  The requirement HLR-C2-009 is orphaned in the traceability matrix. It must be allocated to a specific SRAT and planned for verification via an LLR to complete the traceability chain.
+  Suggested resolution: Create corresponding entries for SRAT-C2-009 and LLR-C2-009.
+
+- A13: Potential duplication or conflict in allocation source for SRAT-C2-003.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 5. Allocation and trace | SRAT-C2-003
+  Rule violated: SDS-TRC-001 (Traceability shall be bidirectional from system-derived software requirements through design/model elements, generated or manual implementation, verification cases and results)
+  Rule evidence: Traceability must be consistent; a requirement should not serve multiple, conflicting roles.
+  SRAT-C2-003 is listed as the source for HLR-C2-004 (paragraph 46) and also appears to be the source for HLR-C2-003 (paragraph 44). This suggests either a duplication of requirements or an incorrect allocation mapping. The true source must be verified.
+  Suggested resolution: Verify the single, authoritative source requirement for the functionality described by HLR-C2-003 and HLR-C2-004, and correct the allocation matrix accordingly.
+
+- A14: HLR-C2-012 is defined but lacks corresponding allocation (SRAT) and planning (LLR) entries.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 5. Allocation and trace | HLR-C2-012
+  Rule violated: SDS-TRC-001 (Traceability shall be bidirectional from system-derived software requirements through design/model elements, generated or manual implementation, verification cases and results)
+  Rule evidence: All defined high-level requirements must be allocated and planned for verification.
+  The requirement HLR-C2-012 is orphaned in the traceability matrix. It must be allocated to a specific SRAT and planned for verification via an LLR to complete the traceability chain.
+  Suggested resolution: Create corresponding entries for SRAT-C2-012 and LLR-C2-012.
+
+- A15: Unjustified claim of completeness and lack of planned reviews.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 6. Candidate approval note | paragraph 143
+  Rule violated: SDS-TRC-002 (A derived requirement shall be identified, justified and fed back to the system safety and requirements processes before approval)
+  Rule evidence: Any assumption of completeness must be backed by a formal review process.
+  The statement 'No derived-requirement or human-factors review is planned' is a major governance risk. For a safety-critical system, the exclusion of Human Factors (HFE) review must be formally justified by a documented risk assessment and approved by the relevant authority.
+  Suggested resolution: If HFE review is genuinely not planned, include a formal deviation record or justification signed off by the Safety Manager. Otherwise, schedule and execute the required HFE review.
+
+- A16: Use of 'UNCONTROLLED WHEN PRINTED' marker in a formal requirement block.
+  Location: DCDS_C2_High_Level_Requirements.docx | section 6. Candidate approval note | requirement DCDS-C2-HLR-001
+  Rule violated: SDS-PRN-001 (The design shall make safety-significant behaviour explicit, deterministic and traceable)
+  Rule evidence: Controlled documents must have clear revision status and approval gates.
+  While the document is marked as an exercise artifact, including 'UNCONTROLLED WHEN PRINTED' within the requirement definition itself is poor practice. The control status should be managed by the document's metadata/header, not embedded in the content.
+  Suggested resolution: Remove the 'UNCONTROLLED WHEN PRINTED' text from the requirement block and rely solely on the document's formal revision control mechanism.

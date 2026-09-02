@@ -56,23 +56,27 @@
       </details>
 
       <details class="panel collapsible-panel" open>
-        <summary class="panel-summary"><h2>2. Retrieval knowledge (RAG)</h2></summary>
-        <p class="section-intro">Load a portable vector store or build a temporary local retrieval index from knowledge documents. Relevant evidence is selected before each review and inserted with source provenance.</p>
+        <summary class="panel-summary"><h2>2. Reference documents and vector index</h2></summary>
+        <p class="section-intro">Every reference document added here is automatically chunked and indexed. Before each review, a section-aware relevance step-through selects the most pertinent evidence with source provenance.</p>
         <div class="rag-layout">
           <div class="rag-source-panel">
-            <h3>Knowledge sources</h3>
+            <h3>Indexed reference documents</h3>
             <div class="row rag-actions">
-              <button id="loadRagStoreBtn" type="button">Load vector store</button>
-              <button id="addRagDocumentsBtn" class="secondary" type="button">Index documents</button>
-              <button id="clearRagBtn" class="secondary" type="button">Clear knowledge</button>
+              <button id="addReferenceBtn" type="button">Add reference files</button>
+              <button id="loadRagStoreBtn" class="secondary" type="button">Import vector store</button>
+              <button id="removeReferenceBtn" class="secondary" type="button">Remove selected</button>
+              <button id="clearRagBtn" class="secondary" type="button">Clear all</button>
             </div>
             <input id="ragStoreInput" type="file" accept=".json,application/json" hidden />
-            <input id="ragDocumentsInput" type="file" multiple hidden />
-            <p class="field-help">Portable JSON stores use a <code>chunks</code> array containing content, source, optional metadata, and optional embedding vectors. Indexed documents use local TF-IDF vector retrieval.</p>
+            <input id="fileInput" type="file" multiple hidden />
+            <select id="referenceList" class="reference-list" size="5" aria-label="Indexed reference documents"></select>
+            <div id="documentStatus" class="muted">No reference documents have been added yet.</div>
+            <div id="chunkTokenDetails" class="chunk-token-details muted">Select an indexed reference to see its per-chunk token counts.</div>
+            <p class="field-help">Token counts are model-neutral estimates because exact tokenisation varies by model. Portable JSON stores may supply content, source metadata, and optional embedding vectors.</p>
           </div>
           <div class="rag-settings-panel">
             <h3>Retrieval settings</h3>
-            <label class="rag-toggle"><input id="ragEnabled" type="checkbox" checked /> Include retrieved knowledge in reviews</label>
+            <label class="rag-toggle"><input id="ragEnabled" type="checkbox" checked /> Include indexed reference evidence in reviews</label>
             <label>Relevant scope
               <select id="ragScope">
                 <option value="12">Focused — up to 12 chunks</option>
@@ -195,21 +199,6 @@
           </label>
         </div>
 
-        <details class="advanced-options">
-          <summary>Optional standards context</summary>
-          <label>Standards or project guidance
-            <textarea id="d0178cContext" rows="5" placeholder="Paste applicable standards guidance or project-specific review rules here..."></textarea>
-          </label>
-        </details>
-        <label>Reference document list
-          <div class="row" style="margin-top:0.25rem;">
-            <button id="addReferenceBtn" class="secondary" type="button">Add selected files</button>
-            <button id="removeReferenceBtn" class="secondary" type="button">Remove selected</button>
-          </div>
-          <select id="referenceList" class="reference-list" size="4"></select>
-          <input id="fileInput" type="file" multiple style="display:none;" />
-        </label>
-        <div id="documentStatus" class="muted">No reference documents have been added yet.</div>
         <label>Documentation to review
           <div class="row" style="margin-top:0.25rem;">
             <button id="reviewModeToggleBtn" class="secondary" type="button">Switch to text entry</button>

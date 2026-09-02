@@ -75,9 +75,9 @@ The hosted URL and model identifier can be saved with the review setup. API keys
 
 The **Review context window** setting applies consistently to review retrieval and benchmarks. It offers 8K, 16K, 32K, 64K, and 128K, plus the model's exact maximum when it falls between those values, preferring 32K where supported. For Ollama, the reviewer reads the architecture context limit from `/api/show` and disables oversized choices. Ollama receives the valid selection as `num_ctx`; larger values require correspondingly more memory. For hosted providers, **Check hosted server** uses context metadata from `/models` when available. If the hosting API does not publish it, enter the server-configured maximum manually before reviewing. Oversized choices are then disabled in the same way.
 
-## Retrieval knowledge (RAG)
+## Indexed reference documents (RAG)
 
-The Retrieval knowledge panel can build a temporary local TF-IDF vector index from any supported document or load a portable JSON vector store. Retrieval runs before the review model is called, preserves chunk provenance, and fills only the context space remaining after the complete target artefact and review instructions. The focused, broad, and maximum settings select up to 12, 24, or 40 relevant chunks respectively.
+The reference list and retrieval index are one workflow: every reference file added through the UI is immediately chunked into the temporary local TF-IDF vector index. Each reference shows its chunk count, estimated total tokens, and estimated tokens per chunk. Removing a reference removes only that document's associated chunks; **Clear all** removes every indexed reference and chunk. Before either a local or hosted review, a section-aware relevance step-through scans the artefact chunks, selects representative target sections, and uses those focused searches to rank reference evidence. This prevents an oversized whole-document query from allowing one section to dominate retrieval while the complete target remains available to the final reviewer. The focused, broad, and maximum settings select up to 12, 24, or 40 relevant chunks respectively.
 
 Portable stores use this structure:
 
@@ -97,7 +97,7 @@ Portable stores use this structure:
 }
 ```
 
-`embedding` is optional. Stores without embeddings and documents indexed through the UI use local TF-IDF cosine ranking. When embeddings, dimensions, and an `embedding_model` are present, the server asks the local Ollama embedding model for the query vector and combines dense cosine similarity with TF-IDF ranking. If embedding generation is unavailable, retrieval falls back to TF-IDF rather than blocking the review. Loaded knowledge remains in memory and is cleared when the server stops or when **Clear knowledge** is selected.
+`embedding` is optional. Stores without embeddings and documents indexed through the UI use local TF-IDF cosine ranking. When embeddings, dimensions, and an `embedding_model` are present, the server asks the local Ollama embedding model for the query vector and combines dense cosine similarity with TF-IDF ranking. If embedding generation is unavailable, retrieval falls back to TF-IDF rather than blocking the review. Displayed token counts are model-neutral estimates; exact counts vary with the selected model's tokenizer. Loaded knowledge remains in memory and is cleared when the server stops or when **Clear all** is selected.
 
 ## Repeatable model benchmark
 

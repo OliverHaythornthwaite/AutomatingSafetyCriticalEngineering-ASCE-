@@ -156,6 +156,51 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertIn("set input_speed 120", result)
         self.assertIn("check output_valid true", result)
 
+    def test_chunking_tracks_sections_separated_by_single_newlines(self):
+        chunks = self.handler._chunk_documents(
+            [{
+                "name": "requirements.docx",
+                "content": (
+                    "1 Introduction\n"
+                    "This document defines the control requirements.\n"
+                    "2.1 Failure Response\n"
+                    "LLR-001 The controller shall enter the safe state."
+                ),
+            }],
+            "TARGET",
+        )
+
+        self.assertIn("section 1 Introduction | paragraph 2", chunks[1])
+        self.assertIn("section 2.1 Failure Response | heading", chunks[2])
+        self.assertIn("section 2.1 Failure Response | requirement LLR-001", chunks[3])
+        self.assertTrue(all("section not resolved" not in chunk for chunk in chunks))
+
+    def test_chunking_recognizes_markdown_and_spreadsheet_sections(self):
+        markdown_chunks = self.handler._chunk_documents(
+            [{"name": "design.md", "content": "# Interface Control\nThe interface accepts bounded values."}],
+            "TARGET",
+        )
+        spreadsheet_chunks = self.handler._chunk_documents(
+            [{"name": "hazards.xlsx", "content": "Worksheet: Hazard Analysis\nRow 4: A4=HZ-001; B4=Loss of output"}],
+            "TARGET",
+        )
+
+        self.assertIn("section Interface Control | paragraph 2", markdown_chunks[1])
+        self.assertIn("section Worksheet: Hazard Analysis | row 4", spreadsheet_chunks[1])
+
+    def test_unheaded_content_uses_a_meaningful_document_fallback(self):
+        chunks = self.handler._chunk_documents(
+            [{"name": "notes.txt", "content": "lowercase introductory material without a heading."}],
+            "TARGET",
+        )
+        normalized = self.handler._normalize_location_label(
+            "TARGET: notes.txt | section Document notes.txt | paragraph 1"
+        )
+
+        self.assertIn("section Document overview", chunks[0])
+        self.assertIn("section document-level content", normalized)
+        self.assertNotIn("not resolved", normalized)
+
     def test_vector_store_loads_and_reports_dense_metadata(self):
         result = self.handler._load_rag_content(
             {
@@ -201,7 +246,11 @@ class ReviewerLogicTests(unittest.TestCase):
         result = self.handler._load_rag_content(
             {
                 "documents": [
-                    {"name": "safety-plan.txt", "content": "Safety changes shall receive independent impact analysis."}
+                    {
+                        "name": "safety-plan.txt",
+                        "document_id": "browser-safety-plan",
+                        "content": "Safety changes shall receive independent impact analysis.",
+                    }
                 ],
                 "append": True,
             }
@@ -210,6 +259,49 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertTrue(result["loaded"])
         self.assertGreaterEqual(result["chunk_count"], 1)
         self.assertEqual("local TF-IDF vector", result["retrieval_mode"])
+        document = result["documents"][0]
+        self.assertEqual("browser-safety-plan", document["document_id"])
+        self.assertEqual("safety-plan.txt", document["name"])
+        self.assertEqual(1, document["chunk_count"])
+        self.assertGreater(document["token_count"], 0)
+        self.assertEqual("browser-safety-plan-chunk-1", document["chunks"][0]["id"])
+        self.assertGreater(document["chunks"][0]["token_count"], 0)
+
+    def test_removing_a_rag_document_deletes_only_its_associated_chunks(self):
+        self.handler._load_rag_content(
+            {
+                "documents": [
+                    {"name": "first.txt", "document_id": "doc-first", "content": "First rule.\n\nFirst rationale."},
+                    {"name": "second.txt", "document_id": "doc-second", "content": "Second rule."},
+                ]
+            }
+        )
+
+        result = self.handler._remove_rag_documents({"document_ids": ["doc-first"]})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(2, result["removed_chunk_count"])
+        self.assertEqual(1, result["chunk_count"])
+        self.assertEqual(["doc-second"], [document["document_id"] for document in result["documents"]])
+        retrieved = self.handler._retrieve_rag_chunks("rule", limit=10)
+        self.assertTrue(all("first.txt" not in chunk for chunk in retrieved))
+        self.assertTrue(any("second.txt" in chunk for chunk in retrieved))
+
+    def test_portable_vector_sources_are_exposed_as_removable_documents(self):
+        result = self.handler._load_rag_content(
+            {
+                "store": {
+                    "chunks": [
+                        {"source": "standard.md", "content": "Rule one"},
+                        {"source": "standard.md", "content": "Rule two"},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(1, result["source_count"])
+        self.assertEqual("standard.md", result["documents"][0]["name"])
+        self.assertEqual(2, result["documents"][0]["chunk_count"])
 
     def test_retrieval_budget_keeps_highest_ranked_complete_chunks(self):
         chunks = ["A" * 20, "B" * 20, "C" * 20]
@@ -217,6 +309,44 @@ class ReviewerLogicTests(unittest.TestCase):
         result = self.handler._select_chunks_with_budget(chunks, limit=3, character_budget=45)
 
         self.assertEqual(chunks[:2], result)
+
+    def test_relevance_stepthrough_covers_distinct_target_sections(self):
+        target_chunks = self.handler._chunk_documents(
+            [{
+                "name": "design.txt",
+                "content": (
+                    "1 Input Validation\nLLR-001 shall reject invalid inputs.\n"
+                    "2 Timing\nLLR-002 shall respond within 20 ms.\n"
+                    "3 Failure Handling\nLLR-003 shall enter the safe state."
+                ),
+            }],
+            "TARGET",
+        )
+
+        plan = self.handler._build_relevance_stepthrough(
+            target_chunks, "Review requirements", "Check validation, timing, and failure behaviour", focus_limit=3
+        )
+
+        self.assertEqual(3, len(plan["focus_chunks"]))
+        self.assertEqual(3, len(set(plan["focus_locations"])))
+        self.assertLessEqual(len(plan["query"]), sum(len(chunk) for chunk in target_chunks) + 200)
+
+    def test_staged_retrieval_preserves_matches_from_multiple_target_sections(self):
+        references = [
+            "Input validation standard requires rejecting malformed values.",
+            "Timing standard defines a maximum response deadline.",
+            "Unrelated presentation guidance for document covers.",
+        ]
+
+        ranked = self.handler._retrieve_relevant_chunks(
+            references,
+            "requirements review",
+            "check compliance",
+            limit=2,
+            focus_chunks=["invalid input validation", "response timing deadline"],
+        )
+
+        self.assertEqual(set(references[:2]), set(ranked))
 
     def test_review_injects_retrieved_rag_evidence_with_provenance(self):
         self.handler._load_rag_content(
@@ -253,6 +383,8 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertIn("[RAG: project-standard.txt", prompt)
         self.assertIn("Independent verification shall cover every safety requirement", prompt)
         self.assertGreaterEqual(result["retrieval"]["selected_chunks"], 1)
+        self.assertEqual("section-aware staged retrieval", result["retrieval"]["relevance_stepthrough"]["strategy"])
+        self.assertGreaterEqual(result["retrieval"]["relevance_stepthrough"]["target_chunks_scanned"], 1)
 
     def test_review_can_use_hosted_provider_without_local_readiness_check(self):
         self.handler._check_model_readiness = lambda model: self.fail("Hosted reviews must not check local Ollama readiness")
@@ -283,6 +415,36 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertEqual("hosted", result["provider_mode"])
         self.assertEqual("hosted", captured["provider"]["mode"])
         self.assertEqual("hosted-review-model", captured["payload"]["model"])
+
+    def test_hosted_model_receives_retrieved_vector_store_context(self):
+        self.handler._load_rag_content(
+            {"documents": [{"name": "hosted-standard.txt", "content": "Every safety change shall be verified independently."}]}
+        )
+        self.handler._check_model_readiness = lambda model: self.fail("Hosted reviews must not check local Ollama readiness")
+        captured = {}
+
+        def request_model_chat(provider, payload, timeout):
+            captured["payload"] = payload
+            return {"message": {"content": json.dumps({"summary": "Hosted review", "sections": [], "atomic_comments": []})}}
+
+        self.handler._request_model_chat = request_model_chat
+        result = self.handler._build_reviewer_response(
+            {
+                "model_provider": {
+                    "mode": "hosted",
+                    "base_url": "https://models.example.test/v1",
+                    "model": "hosted-review-model",
+                },
+                "prompt_mode": "skill",
+                "skill_id": "general-review",
+                "document_text": "LLR-001 changes safety behaviour.",
+                "rag": {"enabled": True, "max_chunks": 12},
+            }
+        )
+
+        prompt = captured["payload"]["messages"][1]["content"]
+        self.assertIn("[RAG: hosted-standard.txt", prompt)
+        self.assertGreaterEqual(result["retrieval"]["selected_chunks"], 1)
 
     def test_perfect_benchmark_output_scores_one_hundred(self):
         output = {
@@ -611,6 +773,190 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertIn("Reviewer role:\nAct as an independent low-level software requirements and design reviewer.", prompt)
         self.assertIn("Execute every configured review section with equal diligence", prompt)
         self.assertIn("every applicable supplied plan, standard, requirement, and instruction", prompt)
+        self.assertIn("Copy that exact location without the surrounding brackets", prompt)
+        self.assertIn("Never omit a finding or atomic comment because its exact location is unavailable", prompt)
+        self.assertLess(prompt.index('"atomic_comments"'), prompt.index('"sections"'))
+        self.assertIn("Never create an atomic_comments_summary section", prompt)
+
+    def test_review_repairs_atomic_comments_omitted_after_long_sections(self):
+        self.handler._check_model_readiness = lambda model: {"ready": True, "reason": "ready"}
+        requests = []
+
+        def request_model_chat(provider, payload, timeout):
+            requests.append(payload)
+            if len(requests) == 1:
+                return {"message": {"content": json.dumps({
+                    "summary": "The document needs revision.",
+                    "atomic_comments": [],
+                    "sections": [
+                        {
+                            "title": "Presentation and controlled use",
+                            "content": "The unmanaged revision fields create confusion and should be consolidated.",
+                        },
+                        {
+                            "title": "atomic_comments_summary",
+                            "content": "See atomic_comments list for detailed findings.",
+                        },
+                    ],
+                })}}
+            return {"message": {"content": json.dumps({
+                "atomic_comments": [{
+                    "id": "A1",
+                    "location": "TARGET: plan.txt | section Document overview | paragraph 1",
+                    "violated_rule": "Configuration-control guidance",
+                    "rule_evidence": "The authoritative baseline must be unambiguous.",
+                    "issue": "Multiple revision fields obscure the authoritative baseline.",
+                    "comment": "Consolidate the revision and approval status fields.",
+                    "suggested_resolution": "Retain one controlled revision/status record.",
+                }]
+            })}}
+
+        self.handler._request_model_chat = request_model_chat
+        result = self.handler._build_reviewer_response({
+            "model": "review-model",
+            "prompt_mode": "skill",
+            "skill_id": "general-review",
+            "document_text": "Revision P0. Prepared date. Unapproved candidate.",
+            "rag": {"enabled": False},
+        })
+
+        self.assertEqual(2, len(requests))
+        self.assertIn("omitted its mandatory atomic_comments array", requests[1]["messages"][1]["content"])
+        self.assertEqual(1, len(result["review_result"]["atomic_comments"]))
+        self.assertEqual("model repair", result["atomic_comment_repair"]["source"])
+        self.assertNotIn("atomic_comments_summary", [section["title"] for section in result["review_result"]["sections"]])
+
+    def test_section_prose_fallback_recovers_issue_sentences_only(self):
+        comments = self.handler._build_atomic_comments_from_section_prose([
+            {
+                "title": "Presentation",
+                "content": (
+                    "The headings are clear and readable. "
+                    "However, the revision fields create confusion. "
+                    "No actionable issues were found in the terminology."
+                ),
+            }
+        ])
+
+        self.assertEqual(1, len(comments))
+        self.assertIn("revision fields create confusion", comments[0]["issue"])
+
+    def test_section_issues_without_locations_still_become_atomic_comments(self):
+        result = self.handler._parse_review_result(json.dumps({
+            "summary": "Location metadata was incomplete.",
+            "sections": [{
+                "title": "Completeness",
+                "content": (
+                    "Issue: Boundary behaviour is undefined.\n"
+                    "Rule violated: HLR-010\n"
+                    "Evidence: No upper limit is stated.\n"
+                    "Target fix: Define the upper boundary.\n\n"
+                    "Issue: Failure handling is absent.\n"
+                    "Evidence: No safe-state response is specified.\n"
+                    "Target fix: Add the failure response."
+                ),
+            }],
+            "atomic_comments": [],
+        }))
+
+        self.assertEqual(2, len(result["atomic_comments"]))
+        self.assertEqual("Target location not specified", result["atomic_comments"][0]["location"])
+        self.assertEqual("Boundary behaviour is undefined.", result["atomic_comments"][0]["issue"])
+        self.assertEqual("Failure handling is absent.", result["atomic_comments"][1]["issue"])
+
+    def test_mixed_resolved_and_unresolved_section_issues_are_all_retained(self):
+        result = self.handler._parse_review_result(json.dumps({
+            "summary": "Two findings.",
+            "sections": [{
+                "title": "Verification",
+                "content": (
+                    "Location: TARGET: requirements.docx | section 3 Verification | requirement LLR-020\n"
+                    "Issue: The acceptance criterion is subjective.\n"
+                    "Evidence: The requirement says rapidly.\n"
+                    "Target fix: Add a measurable time.\n\n"
+                    "Issue: Independence is not defined.\n"
+                    "Evidence: No review role is identified.\n"
+                    "Target fix: Identify an independent reviewer."
+                ),
+            }],
+        }))
+
+        self.assertEqual(2, len(result["atomic_comments"]))
+        self.assertIn("section 3 Verification", result["atomic_comments"][0]["location"])
+        self.assertEqual("Target location not specified", result["atomic_comments"][1]["location"])
+
+    def test_explicit_atomic_comment_without_location_is_preserved(self):
+        result = self.handler._parse_review_result(json.dumps({
+            "summary": "One finding.",
+            "sections": [],
+            "atomic_comments": [{"issue": "Missing rationale", "comment": "No rationale was supplied."}],
+        }))
+
+        self.assertEqual(1, len(result["atomic_comments"]))
+        self.assertEqual("Missing rationale", result["atomic_comments"][0]["issue"])
+        self.assertEqual("Target location not specified", result["atomic_comments"][0]["location"])
+
+    def test_review_parser_extracts_json_from_explanatory_markdown(self):
+        raw_review = (
+            "Here is the completed review.\n```json\n"
+            + json.dumps({
+                "summary": "Two issues found.",
+                "sections": [{"title": "Traceability", "content": "No parent link was supplied."}],
+                "atomic_comments": [],
+            })
+            + "\n```\n"
+        )
+
+        result = self.handler._parse_review_result(raw_review)
+
+        self.assertEqual("Two issues found.", result["summary"])
+        self.assertEqual("Traceability", result["sections"][0]["title"])
+        self.assertNotIn("```json", result["summary"])
+
+    def test_review_parser_formats_double_encoded_structured_findings(self):
+        structured_review = {
+            "summary": {"status": "Needs revision", "issue_count": 1},
+            "sections": {
+                "Requirements": {
+                    "findings": [
+                        {
+                            "location": "LLR-001",
+                            "rule": "HLR-001",
+                            "issue": "The boundary is undefined.",
+                            "evidence": "No maximum value is stated.",
+                            "fix": "Define the accepted range.",
+                        }
+                    ]
+                }
+            },
+            "atomicComments": [],
+        }
+
+        result = self.handler._parse_review_result(json.dumps(json.dumps(structured_review)))
+
+        self.assertIn("Status: Needs revision", result["summary"])
+        self.assertEqual("Requirements", result["sections"][0]["title"])
+        self.assertIn("Location: LLR-001", result["sections"][0]["content"])
+        self.assertIn("Target fix: Define the accepted range.", result["sections"][0]["content"])
+        self.assertNotIn('{"location"', result["sections"][0]["content"])
+        self.assertEqual("The boundary is undefined.", result["atomic_comments"][0]["issue"])
+
+    def test_review_parser_itemizes_a_top_level_comment_array(self):
+        raw_review = json.dumps([
+            {
+                "location": "LLR-002",
+                "rule": "HLR-002",
+                "issue": "The timeout is not measurable.",
+                "comment": "No unit is specified.",
+                "target_fix": "State the timeout in milliseconds.",
+            }
+        ])
+
+        result = self.handler._parse_review_result(raw_review)
+
+        self.assertEqual(1, len(result["atomic_comments"]))
+        self.assertEqual("LLR-002", result["atomic_comments"][0]["location"])
+        self.assertEqual("State the timeout in milliseconds.", result["atomic_comments"][0]["suggested_resolution"])
 
     def test_unknown_skill_is_rejected_before_review(self):
         result = self.handler._build_reviewer_response(
@@ -645,10 +991,20 @@ class StaticServerTests(unittest.TestCase):
         content = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
 
         self.assertNotIn('class="grid"', content)
-        self.assertLess(content.index("1. Tooling"), content.index("2. Retrieval knowledge (RAG)"))
-        self.assertLess(content.index("2. Retrieval knowledge (RAG)"), content.index("3. Model access"))
+        self.assertLess(content.index("1. Tooling"), content.index("2. Reference documents and vector index"))
+        self.assertLess(content.index("2. Reference documents and vector index"), content.index("3. Model access"))
         self.assertLess(content.index("3. Model access"), content.index("4. Review setup"))
         self.assertNotIn("Local, structured review", content)
+
+    def test_optional_standards_context_option_is_removed(self):
+        html = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
+        server_source = (PROJECT_DIR / "server.py").read_text(encoding="utf-8")
+
+        for removed_text in ("Optional standards context", "d0178cContext", "d0178c_context", "DO-178C-context"):
+            self.assertNotIn(removed_text, html)
+            self.assertNotIn(removed_text, javascript)
+            self.assertNotIn(removed_text, server_source)
 
     def test_all_main_sections_are_collapsible(self):
         content = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
@@ -698,6 +1054,17 @@ class StaticServerTests(unittest.TestCase):
         self.assertIn("option.disabled = !contextLimit", javascript)
         self.assertNotIn("hostedApiKey: hostedApiKey.value", javascript)
 
+    def test_reference_list_is_the_only_document_indexing_workflow(self):
+        html = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertEqual(1, html.count('id="referenceList"'))
+        self.assertEqual(1, html.count('id="fileInput"'))
+        self.assertNotIn("addRagDocumentsBtn", html)
+        self.assertNotIn("ragDocumentsInput", javascript)
+        self.assertIn("Chunking and indexing", javascript)
+        self.assertIn('id="chunkTokenDetails"', html)
+
     def test_tooling_formats_scroll_horizontally(self):
         stylesheet = (PROJECT_DIR / "styles.css").read_text(encoding="utf-8")
 
@@ -720,6 +1087,41 @@ class StaticServerTests(unittest.TestCase):
         self.assertEqual(0, payload["chunk_count"])
         self.assertIn("retrieval_mode", payload)
 
+    def test_rag_document_removal_endpoint_deletes_associated_chunks(self):
+        load_request = urllib.request.Request(
+            f"{self.base_url}/api/rag/load",
+            data=json.dumps({
+                "documents": [{"name": "endpoint.txt", "document_id": "endpoint-doc", "content": "Endpoint rule."}]
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        remove_request = urllib.request.Request(
+            f"{self.base_url}/api/rag/remove",
+            data=json.dumps({"document_ids": ["endpoint-doc"]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(load_request, timeout=2) as response:
+                self.assertTrue(json.loads(response.read().decode("utf-8"))["loaded"])
+            with urllib.request.urlopen(remove_request, timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(1, payload["removed_chunk_count"])
+            self.assertFalse(payload["loaded"])
+        finally:
+            self._post_json("/api/rag/clear", {})
+
+    def _post_json(self, path, body):
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            return json.loads(response.read().decode("utf-8"))
+
     def test_health_advertises_benchmark_and_rag_capabilities(self):
         with urllib.request.urlopen(f"{self.base_url}/api/health", timeout=2) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -727,6 +1129,7 @@ class StaticServerTests(unittest.TestCase):
         self.assertEqual(server.API_VERSION, payload["api_version"])
         self.assertIn("model-benchmark-v1", payload["capabilities"])
         self.assertIn("rag-store-v1", payload["capabilities"])
+        self.assertIn("rag-document-lifecycle-v1", payload["capabilities"])
         self.assertIn("hosted-model-v1", payload["capabilities"])
         self.assertIn("context-window-v1", payload["capabilities"])
         self.assertIn("model-context-discovery-v1", payload["capabilities"])
@@ -752,6 +1155,37 @@ class StaticServerTests(unittest.TestCase):
 
         self.assertIn("because the running ASCS Reviewer server is outdated", javascript)
         self.assertIn("Server update required: restart ASCS Reviewer", javascript)
+
+    def test_javascript_synchronizes_indexed_documents_and_chunk_removal(self):
+        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("syncRagReferenceEntries(data)", javascript)
+        self.assertIn("/api/rag/remove", javascript)
+        self.assertIn("!entry.rag_document_id", javascript)
+
+    def test_javascript_normalizes_structured_review_before_rendering(self):
+        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("normalizeReviewResultForDisplay", javascript)
+        self.assertIn("parseStructuredReviewJson", javascript)
+        self.assertIn("escapeHtml(reviewResult?.summary", javascript)
+
+    def test_review_findings_have_individual_copy_icons(self):
+        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
+        stylesheet = (PROJECT_DIR / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="finding-copy-button"', javascript)
+        self.assertIn("handleReviewOutputClick", javascript)
+        self.assertIn("copyTextToClipboard", javascript)
+        self.assertIn("Comment ${index + 1}", javascript)
+        self.assertIn(".finding-copy-button", stylesheet)
+
+    def test_browser_itemizes_comments_that_have_no_location(self):
+        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("(Location|Issue):", javascript)
+        self.assertIn("const blockStarts = []", javascript)
+        self.assertIn("Comment|Details|Target fix|Suggested resolution", javascript)
 
     def test_unknown_static_path_is_not_served(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:
