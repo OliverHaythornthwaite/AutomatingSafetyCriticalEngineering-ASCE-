@@ -56,6 +56,7 @@ const hostedModelSummary = document.getElementById('hostedModelSummary');
 const contextWindow = document.getElementById('contextWindow');
 const contextWindowStatus = document.getElementById('contextWindowStatus');
 const hostedContextLimit = document.getElementById('hostedContextLimit');
+const reasoningEffortSelect = document.getElementById('reasoningEffortSelect');
 const reviewDocuments = [];
 const referenceEntries = [];
 let indexedReferenceDocuments = [];
@@ -70,7 +71,7 @@ let modelAccessMode = 'ollama';
 let hostedDetectedModelName = '';
 let preferredContextWindow = 32768;
 const benchmarkResults = new Map();
-const REQUIRED_SERVER_CAPABILITIES = ['context-window-v1', 'model-context-discovery-v1', 'hosted-model-v1', 'model-benchmark-v1', 'rag-store-v1', 'rag-document-lifecycle-v1', 'indexed-reference-workflow-v1', 'staged-retrieval-v1', 'chunk-token-count-v1'];
+const REQUIRED_SERVER_CAPABILITIES = ['context-window-v1', 'model-context-discovery-v1', 'hosted-model-v1', 'model-benchmark-v1', 'rag-store-v1', 'rag-document-lifecycle-v1', 'indexed-reference-workflow-v1', 'staged-retrieval-v1', 'chunk-token-count-v1', 'reasoning-effort-levels-v1'];
 
 function saveConfig() {
   captureCurrentSkillAnswers();
@@ -89,6 +90,7 @@ function saveConfig() {
     hostedModel: hostedModel.value.trim(),
     contextWindow: contextWindow.value,
     hostedContextLimit: hostedContextLimit.value,
+    reasoningEffort: reasoningEffortSelect.value,
   };
   writeConfig(config);
   reviewStatus.textContent = 'Configuration saved.';
@@ -125,6 +127,12 @@ function applyConfig(config) {
   }
   if (config.hostedContextLimit && Number(config.hostedContextLimit) > 0) {
     hostedContextLimit.value = String(config.hostedContextLimit);
+  }
+  const savedReasoningEffort = typeof config.reasoningEffort === 'string'
+    ? config.reasoningEffort
+    : (typeof config.lowReasoning === 'boolean' ? (config.lowReasoning ? 'low' : 'default') : 'low');
+  if (['default', 'none', 'low', 'medium', 'high', 'xhigh'].includes(savedReasoningEffort)) {
+    reasoningEffortSelect.value = savedReasoningEffort;
   }
   if (typeof config.ragEnabled === 'boolean') {
     ragEnabled.checked = config.ragEnabled;
@@ -958,6 +966,7 @@ function buildReviewPayload() {
     model: modelProvider.model,
     model_provider: modelProvider,
     context_window: Number(contextWindow.value),
+    reasoning_effort: reasoningEffortSelect.value,
     prompt_mode: promptMode,
     document_text: document.getElementById('documentText').value,
     rag: {
@@ -979,9 +988,13 @@ function buildReviewPayload() {
 }
 
 async function runReview() {
+  const selectedReasoningEffort = reasoningEffortSelect.value;
+  const reasoningStatus = selectedReasoningEffort === 'default'
+    ? ''
+    : (selectedReasoningEffort === 'none' ? ' with reasoning disabled' : ` with ${selectedReasoningEffort} reasoning effort`);
   reviewStatus.textContent = modelAccessMode === 'hosted'
-    ? 'Sending the review to the hosted model server...'
-    : 'Reviewing with high effort. Large local models can take several minutes...';
+    ? `Sending the review to the hosted model server${reasoningStatus}...`
+    : `Reviewing${reasoningStatus}. Large local models can take several minutes...`;
   reviewOutput.textContent = 'Generating complete-document review...';
   try {
     validateContextSelection();

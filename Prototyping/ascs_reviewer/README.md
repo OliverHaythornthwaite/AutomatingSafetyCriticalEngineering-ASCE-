@@ -78,6 +78,13 @@ The hosted URL and model identifier can be saved with the review setup. API keys
 
 The **Review context window** setting applies consistently to review retrieval and benchmarks. It offers 8K, 16K, 32K, 64K, and 128K, plus the model's exact maximum when it falls between those values, preferring 32K where supported. For Ollama, the reviewer reads the architecture context limit from `/api/show` and disables oversized choices. Ollama receives the valid selection as `num_ctx`; larger values require correspondingly more memory. For hosted providers, **Check hosted server** uses context metadata from `/models` when available. If the hosting API does not publish it, enter the server-configured maximum manually before reviewing. Oversized choices are then disabled in the same way.
 
+The **Reasoning effort** setting defaults to **Low** and also offers provider
+default, disabled, medium, high, and extra high. Native Ollama requests receive
+the corresponding `think` value (`false` when disabled); hosted OpenAI-compatible
+requests receive `reasoning_effort`. Extra high is intended for models such as
+Muse Glimmer that explicitly support it. If a model or provider rejects the
+control, the reviewer retries once without it.
+
 ## Indexed reference documents (RAG)
 
 The reference list and retrieval index are one workflow: every reference file added through the UI is immediately chunked into the temporary local TF-IDF vector index. Each reference shows its chunk count, estimated total tokens, and estimated tokens per chunk. Removing a reference removes only that document's associated chunks; **Clear all** removes every indexed reference and chunk. Before either a local or hosted review, a section-aware relevance step-through scans the artefact chunks, selects representative target sections, and uses those focused searches to rank reference evidence. This prevents an oversized whole-document query from allowing one section to dominate retrieval while the complete target remains available to the final reviewer. The focused, broad, and maximum settings select up to 12, 24, or 40 relevant chunks respectively.

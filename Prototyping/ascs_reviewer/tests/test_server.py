@@ -101,6 +101,7 @@ class ReviewerLogicTests(unittest.TestCase):
             {
                 "messages": [{"role": "user", "content": "Review this"}],
                 "options": {"temperature": 0, "top_p": 1, "seed": 42, "num_predict": 500},
+                "reasoning_effort": "low",
             },
             timeout=30,
         )
@@ -109,8 +110,80 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertEqual("review-model", captured["payload"]["model"])
         self.assertEqual({"type": "json_object"}, captured["payload"]["response_format"])
         self.assertEqual(42, captured["payload"]["seed"])
+        self.assertEqual("low", captured["payload"]["reasoning_effort"])
         self.assertEqual('{"summary":"Reviewed"}', response["message"]["content"])
         self.assertEqual(12, response["prompt_eval_count"])
+
+    def test_local_chat_maps_low_reasoning_to_ollama_think_field(self):
+        captured = {}
+
+        def request_ollama(path, payload=None, timeout=None):
+            captured.update(path=path, payload=payload, timeout=timeout)
+            return {"message": {"content": '{"summary":"Reviewed"}'}, "done": True}
+
+        self.handler._request_ollama = request_ollama
+        response = self.handler._request_model_chat(
+            {"mode": "ollama", "model": "muse-glimmer"},
+            {
+                "model": "muse-glimmer",
+                "messages": [{"role": "user", "content": "Review this"}],
+                "reasoning_effort": "low",
+            },
+            timeout=30,
+        )
+
+        self.assertEqual("/api/chat", captured["path"])
+        self.assertEqual("low", captured["payload"]["think"])
+        self.assertNotIn("reasoning_effort", captured["payload"])
+        self.assertEqual('{"summary":"Reviewed"}', response["message"]["content"])
+
+    def test_local_chat_retries_without_reasoning_control_when_unsupported(self):
+        requests = []
+
+        def request_ollama(path, payload=None, timeout=None):
+            requests.append(payload)
+            if len(requests) == 1:
+                return {"error": "model does not support thinking"}
+            return {"message": {"content": '{"summary":"Reviewed"}'}, "done": True}
+
+        self.handler._request_ollama = request_ollama
+        response = self.handler._request_model_chat(
+            {"mode": "ollama", "model": "plain-model"},
+            {"model": "plain-model", "messages": [], "reasoning_effort": "low"},
+            timeout=30,
+        )
+
+        self.assertEqual(2, len(requests))
+        self.assertEqual("low", requests[0]["think"])
+        self.assertNotIn("think", requests[1])
+        self.assertEqual('{"summary":"Reviewed"}', response["message"]["content"])
+
+    def test_disabled_reasoning_maps_to_false_for_ollama(self):
+        captured = {}
+
+        def request_ollama(path, payload=None, timeout=None):
+            captured.update(payload=payload)
+            return {"message": {"content": '{"summary":"Reviewed"}'}, "done": True}
+
+        self.handler._request_ollama = request_ollama
+        self.handler._request_model_chat(
+            {"mode": "ollama", "model": "thinking-model"},
+            {"model": "thinking-model", "messages": [], "reasoning_effort": "none"},
+            timeout=30,
+        )
+
+        self.assertIs(False, captured["payload"]["think"])
+
+    def test_review_rejects_unknown_reasoning_effort(self):
+        result = self.handler._build_reviewer_response({
+            "model": "review-model",
+            "reasoning_effort": "extreme",
+            "prompt_mode": "skill",
+            "skill_id": "general-review",
+            "document_text": "Requirement text.",
+        })
+
+        self.assertIn("Reasoning effort must be", result["error"])
 
     def test_hosted_health_reports_model_availability(self):
         self.handler._request_hosted_server = lambda provider, path, timeout=None: {
@@ -814,6 +887,7 @@ class ReviewerLogicTests(unittest.TestCase):
         self.handler._request_model_chat = request_model_chat
         result = self.handler._build_reviewer_response({
             "model": "review-model",
+            "reasoning_effort": "high",
             "prompt_mode": "skill",
             "skill_id": "general-review",
             "document_text": "Revision P0. Prepared date. Unapproved candidate.",
@@ -821,6 +895,7 @@ class ReviewerLogicTests(unittest.TestCase):
         })
 
         self.assertEqual(2, len(requests))
+        self.assertTrue(all(request["reasoning_effort"] == "high" for request in requests))
         self.assertIn("omitted its mandatory atomic_comments array", requests[1]["messages"][1]["content"])
         self.assertEqual(1, len(result["review_result"]["atomic_comments"]))
         self.assertEqual("model repair", result["atomic_comment_repair"]["source"])
@@ -1050,7 +1125,11 @@ class StaticServerTests(unittest.TestCase):
         self.assertIn('id="contextWindow"', html)
         self.assertIn('id="contextWindowStatus"', html)
         self.assertIn('id="hostedContextLimit"', html)
+        self.assertIn('id="reasoningEffortSelect"', html)
+        self.assertIn('<option value="low" selected>Low</option>', html)
+        self.assertIn('<option value="xhigh">Extra high (supported models only)</option>', html)
         self.assertIn("model_provider: modelProvider", javascript)
+        self.assertIn("reasoning_effort: reasoningEffortSelect.value", javascript)
         self.assertIn("option.disabled = !contextLimit", javascript)
         self.assertNotIn("hostedApiKey: hostedApiKey.value", javascript)
 
@@ -1160,6 +1239,7 @@ class StaticServerTests(unittest.TestCase):
         self.assertIn("hosted-model-v1", payload["capabilities"])
         self.assertIn("context-window-v1", payload["capabilities"])
         self.assertIn("model-context-discovery-v1", payload["capabilities"])
+        self.assertIn("reasoning-effort-levels-v1", payload["capabilities"])
 
     def test_skill_definitions_are_served(self):
         with urllib.request.urlopen(f"{self.base_url}/api/skills", timeout=2) as response:

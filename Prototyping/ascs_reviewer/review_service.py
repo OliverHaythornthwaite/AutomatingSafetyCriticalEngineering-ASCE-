@@ -28,6 +28,16 @@ class ReviewServiceMixin:
         if provider.get("error"):
             return {"error": provider["error"], "review": "", "retrieved_chunks": []}
         model = provider.get("model") or requested_model
+        requested_reasoning_effort = body.get("reasoning_effort")
+        if requested_reasoning_effort is None:
+            requested_reasoning_effort = "low" if body.get("low_reasoning") is True else "default"
+        if requested_reasoning_effort not in {"default", "none", "low", "medium", "high", "xhigh"}:
+            return {
+                "error": "Reasoning effort must be provider default, disabled, low, medium, high, or extra high.",
+                "review": "",
+                "retrieved_chunks": [],
+            }
+        reasoning_effort = None if requested_reasoning_effort == "default" else requested_reasoning_effort
         try:
             context_window = self._resolve_review_context_window(body, provider.get("context_limit"))
         except ValueError as exc:
@@ -130,6 +140,8 @@ class ReviewServiceMixin:
             "options": self._build_review_model_options(prompt_length, context_window),
             "keep_alive": MODEL_KEEP_ALIVE,
         }
+        if reasoning_effort:
+            ollama_payload["reasoning_effort"] = reasoning_effort
 
         response = self._request_model_chat(provider, ollama_payload, timeout=OLLAMA_REVIEW_TIMEOUT_SECONDS)
         if isinstance(response, dict) and response.get("error"):
@@ -166,7 +178,7 @@ class ReviewServiceMixin:
         repair_source = ""
         if repair_attempted:
             repaired_comments = self._request_atomic_comment_repair(
-                provider, model, context_window, review_text
+                provider, model, context_window, review_text, reasoning_effort=reasoning_effort
             )
             if repaired_comments:
                 review_result["atomic_comments"] = repaired_comments
@@ -186,6 +198,7 @@ class ReviewServiceMixin:
             "retrieved_chunks": target_chunks[:6] + selected_reference[:6],
             "model": model,
             "provider_mode": provider["mode"],
+            "reasoning_effort": reasoning_effort or "provider-default",
             "context_window": context_window,
             "source_count": source_count,
             "retrieval": retrieval_summary,

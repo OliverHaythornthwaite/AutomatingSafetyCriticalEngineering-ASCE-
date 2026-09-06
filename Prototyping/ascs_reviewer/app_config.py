@@ -57,7 +57,7 @@ RAG_STORE = {
 MODEL_CONTEXT_CACHE_LOCK = threading.Lock()
 MODEL_CONTEXT_CACHE = {}
 
-API_VERSION = "1.7"
+API_VERSION = "1.9"
 API_CAPABILITIES = [
     "context-window-v1",
     "model-context-discovery-v1",
@@ -69,6 +69,7 @@ API_CAPABILITIES = [
     "staged-retrieval-v1",
     "chunk-token-count-v1",
     "scade-parser-v1",
+    "reasoning-effort-levels-v1",
 ]
 
 BENCHMARK_VERSION = "1.0"

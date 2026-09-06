@@ -228,8 +228,18 @@ class ModelProviderMixin:
             return {"error": str(exc)}
 
     def _request_model_chat(self, provider, ollama_payload, timeout):
+        reasoning_effort = ollama_payload.get("reasoning_effort")
         if provider["mode"] == "ollama":
-            return self._request_ollama("/api/chat", ollama_payload, timeout=timeout)
+            native_payload = dict(ollama_payload)
+            native_payload.pop("reasoning_effort", None)
+            if reasoning_effort:
+                native_payload["think"] = False if reasoning_effort == "none" else reasoning_effort
+            response = self._request_ollama("/api/chat", native_payload, timeout=timeout)
+            if reasoning_effort and self._reasoning_control_rejected(response):
+                fallback_payload = dict(native_payload)
+                fallback_payload.pop("think", None)
+                response = self._request_ollama("/api/chat", fallback_payload, timeout=timeout)
+            return response
 
         options = ollama_payload.get("options") or {}
         hosted_payload = {
@@ -243,11 +253,14 @@ class ModelProviderMixin:
         }
         if "seed" in options:
             hosted_payload["seed"] = options["seed"]
+        if reasoning_effort:
+            hosted_payload["reasoning_effort"] = reasoning_effort
         response = self._request_hosted_server(provider, "/chat/completions", hosted_payload, timeout=timeout)
         error_text = str(response.get("error") or "").lower() if isinstance(response, dict) else ""
-        if error_text and any(term in error_text for term in ("response_format", "seed", "unsupported", "unrecognized")):
+        if error_text and any(term in error_text for term in ("response_format", "seed", "reasoning", "unsupported", "unrecognized")):
             hosted_payload.pop("response_format", None)
             hosted_payload.pop("seed", None)
+            hosted_payload.pop("reasoning_effort", None)
             response = self._request_hosted_server(provider, "/chat/completions", hosted_payload, timeout=timeout)
         if not isinstance(response, dict) or response.get("error"):
             return response
@@ -262,6 +275,13 @@ class ModelProviderMixin:
             "prompt_eval_count": usage.get("prompt_tokens"),
             "eval_count": usage.get("completion_tokens"),
         }
+
+    @staticmethod
+    def _reasoning_control_rejected(response):
+        if not isinstance(response, dict) or not response.get("error"):
+            return False
+        error_text = str(response["error"]).lower()
+        return any(term in error_text for term in ("think", "reasoning", "unsupported", "unrecognized", "unknown field"))
 
     def _run_model_benchmark(self, body):
         model_name = self._extract_model_name(body)

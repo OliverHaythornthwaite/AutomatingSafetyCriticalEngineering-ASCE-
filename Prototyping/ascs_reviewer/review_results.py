@@ -133,7 +133,7 @@ class ReviewResultMixin:
         normalized = re.sub(r"[^a-z0-9]+", "", title.lower())
         return normalized in {"atomiccommentssummary", "atomiccommentslist", "atomiccomments"}
 
-    def _request_atomic_comment_repair(self, provider, model, context_window, review_text):
+    def _request_atomic_comment_repair(self, provider, model, context_window, review_text, reasoning_effort=None):
         repair_contract = {
             "atomic_comments": [
                 {
@@ -166,6 +166,8 @@ class ReviewResultMixin:
             "options": self._build_review_model_options(len(prompt), context_window),
             "keep_alive": MODEL_KEEP_ALIVE,
         }
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
         response = self._request_model_chat(provider, payload, timeout=OLLAMA_REVIEW_TIMEOUT_SECONDS)
         repair_text, error = self._extract_review_text(response)
         if error:
@@ -317,7 +319,7 @@ class ReviewResultMixin:
             return (
                 "",
                 "The selected model responded only with internal reasoning and did not produce the final JSON review. "
-                f"Ollama ended with reason '{done_reason}'. Increase OLLAMA_REVIEW_NUM_PREDICT, use a faster/non-reasoning model, or reduce the complete review batch size.",
+                f"Ollama ended with reason '{done_reason}'. Select low reasoning effort, increase OLLAMA_REVIEW_NUM_PREDICT, or reduce the complete review batch size.",
             )
 
         return "", "The selected model returned an empty review response."

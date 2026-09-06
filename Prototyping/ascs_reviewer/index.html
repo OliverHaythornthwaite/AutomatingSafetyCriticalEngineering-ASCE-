@@ -168,6 +168,17 @@
         <label id="hostedModelSelection" hidden>Hosted model
           <input id="hostedModelSummary" type="text" value="Configure the hosted model in Model access" readonly />
         </label>
+        <label class="reasoning-effort-control">Reasoning effort
+          <select id="reasoningEffortSelect">
+            <option value="default">Provider default</option>
+            <option value="none">Disabled</option>
+            <option value="low" selected>Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="xhigh">Extra high (supported models only)</option>
+          </select>
+        </label>
+        <p class="field-help">Controls the reasoning-token budget for compatible models such as Muse Glimmer. Unsupported providers are retried without this option.</p>
 
         <fieldset class="mode-switch">
           <legend>Review mode</legend>

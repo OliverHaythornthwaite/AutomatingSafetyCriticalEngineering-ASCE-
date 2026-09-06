@@ -59,6 +59,7 @@ button.secondary:hover { background: #4d5d67; }
 .mode-switch legend { padding: 0 0.3rem; font-size: 0.9rem; font-weight: 700; }
 .mode-switch label { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; font-weight: 600; }
 .mode-switch input { width: auto; margin: 0; padding: 0; accent-color: var(--accent); }
+.reasoning-effort-control { max-width: 24rem; }
 .skill-fields { display: grid; gap: 0.35rem; }
 .skill-field { padding: 0.55rem 0; border-top: 1px solid var(--border); }
 .skill-field:first-child { border-top: 0; }
