@@ -2,7 +2,7 @@
 
 import json
 
-from app_config import MODEL_KEEP_ALIVE, OLLAMA_REVIEW_TIMEOUT_SECONDS, SKILLS_DIRECTORY
+from app_config import SKILLS_DIRECTORY
 from skill_store import SkillStore, SkillValidationError
 
 
@@ -23,15 +23,11 @@ class ReviewServiceMixin:
         skills_prompt = prompt_configuration["skills_prompt"]
         review_goal = prompt_configuration["review_goal"]
         document_text = (body.get("document_text") or "").strip()
-        requested_model = str(body.get("model") or "llama3.2").strip()
-        provider = self._resolve_model_provider(body, requested_model)
+        provider = self._configured_provider()
         if provider.get("error"):
             return {"error": provider["error"], "review": "", "retrieved_chunks": []}
-        model = provider.get("model") or requested_model
-        try:
-            context_window = self._resolve_review_context_window(body, provider.get("context_limit"))
-        except ValueError as exc:
-            return {"error": str(exc), "review": "", "retrieved_chunks": [], "model": model, "provider_mode": provider["mode"]}
+        model = provider["model"]
+        context_window = provider["context_limit"]
         documents = body.get("documents") or []
         reference_document_entries = body.get("reference_documents") or []
         rag_options = body.get("rag") if isinstance(body.get("rag"), dict) else {}
@@ -54,19 +50,6 @@ class ReviewServiceMixin:
         reference_documents = self._collect_reference_documents(reference_document_entries)
         rag_status = self._get_rag_status()
         source_count = len(target_documents) + len(reference_documents) + (rag_status["source_count"] if rag_enabled else 0)
-
-        if provider["mode"] == "ollama":
-            readiness = self._check_model_readiness(model)
-            if not readiness["ready"]:
-                return {
-                    "error": readiness["reason"],
-                    "review": "",
-                    "retrieved_chunks": [],
-                    "model": model,
-                    "provider_mode": provider["mode"],
-                    "context_window": context_window,
-                    "source_count": source_count,
-                }
 
         target_chunks = self._chunk_documents(target_documents, "TARGET")
         reference_chunks = self._chunk_documents(reference_documents, "REFERENCE")
@@ -99,8 +82,7 @@ class ReviewServiceMixin:
             "selected_chunks": len(selected_reference),
             "context_budget_characters": retrieval_budget,
             "loaded_store": rag_status["name"] if rag_enabled else "",
-            "retrieval_mode": rag_status["retrieval_mode"] if rag_enabled and rag_status["loaded"] else "local TF-IDF vector",
-            "vector_chunks": rag_status["vector_chunk_count"] if rag_enabled else 0,
+            "retrieval_mode": rag_status["retrieval_mode"] if rag_enabled and rag_status["loaded"] else "local TF-IDF",
             "relevance_stepthrough": {
                 "strategy": "section-aware staged retrieval",
                 "target_chunks_scanned": len(target_chunks),
@@ -113,8 +95,7 @@ class ReviewServiceMixin:
         user_prompt = self._build_review_prompt(prompt_configuration["prompt_configuration"], target_context_text, reference_context_text)
         prompt_length = len(user_prompt)
 
-        ollama_payload = {
-            "model": model,
+        request_payload = {
             "messages": [
                 {
                     "role": "system",
@@ -126,24 +107,16 @@ class ReviewServiceMixin:
                 },
             ],
             "stream": False,
-            "format": "json",
             "options": self._build_review_model_options(prompt_length, context_window),
-            "keep_alive": MODEL_KEEP_ALIVE,
         }
 
-        response = self._request_model_chat(provider, ollama_payload, timeout=OLLAMA_REVIEW_TIMEOUT_SECONDS)
+        response = self._request_model_chat(provider, request_payload, timeout=provider["review_timeout"])
         if isinstance(response, dict) and response.get("error"):
-            diagnostic_reason = (
-                self._diagnose_prompt_failure(response["error"], model, prompt_length, source_count)
-                if provider["mode"] == "ollama"
-                else f"Hosted review request failed for {model}: {response['error']}"
-            )
+            diagnostic_reason = self._diagnose_prompt_failure(response["error"], model, prompt_length, source_count)
             return {
                 "error": diagnostic_reason,
                 "review": "",
                 "retrieved_chunks": target_chunks[:6] + selected_reference[:6],
-                "model": model,
-                "provider_mode": provider["mode"],
                 "context_window": context_window,
                 "source_count": source_count,
                 "retrieval": retrieval_summary,
@@ -155,8 +128,6 @@ class ReviewServiceMixin:
                 "error": extraction_error,
                 "review": "",
                 "retrieved_chunks": target_chunks[:6] + selected_reference[:6],
-                "model": model,
-                "provider_mode": provider["mode"],
                 "context_window": context_window,
                 "source_count": source_count,
                 "retrieval": retrieval_summary,
@@ -184,8 +155,6 @@ class ReviewServiceMixin:
             "review": review_result.get("summary") or review_text.strip(),
             "review_result": review_result,
             "retrieved_chunks": target_chunks[:6] + selected_reference[:6],
-            "model": model,
-            "provider_mode": provider["mode"],
             "context_window": context_window,
             "source_count": source_count,
             "retrieval": retrieval_summary,

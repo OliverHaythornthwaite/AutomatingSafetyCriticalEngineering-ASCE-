@@ -12,92 +12,168 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR))
 
 import server  # noqa: E402
+import app_config  # noqa: E402
 
 
 class ReviewerLogicTests(unittest.TestCase):
     def setUp(self):
         self.handler = server.ASCSReviewerHandler.__new__(server.ASCSReviewerHandler)
+        self.original_inference_settings = app_config.get_inference_settings()
         self.handler._clear_rag_content()
-        with server.MODEL_CONTEXT_CACHE_LOCK:
-            server.MODEL_CONTEXT_CACHE.clear()
 
     def tearDown(self):
+        app_config.replace_inference_settings(self.original_inference_settings)
         self.handler._clear_rag_content()
 
-    def test_model_status_contains_only_ollama_models(self):
-        responses = {
-            "/api/tags": {
-                "models": [
-                    {
-                        "name": "review-model:latest",
-                        "size": 123,
-                        "details": {
-                            "format": "gguf",
-                            "family": "test-family",
-                            "parameter_size": "3B",
-                            "quantization_level": "Q4_K_M",
-                        },
-                    }
-                ]
-            },
-            "/api/ps": {
-                "models": [
-                    {
-                        "name": "review-model:latest",
-                        "context_length": 8192,
-                        "size_vram": 456,
-                    }
-                ]
-            },
-            "/api/show": {"model_info": {"test-family.context_length": 32768}},
-        }
-        self.handler._request_ollama = lambda path, *args, **kwargs: responses[path]
+    def test_inference_configuration_is_managed_by_the_server(self):
+        provider = self.handler._configured_provider()
 
-        result = self.handler._get_model_status()
+        self.assertNotIn("error", provider)
+        self.assertTrue(provider["base_url"].startswith(("http://", "https://")))
+        self.assertTrue(provider["model"])
+        self.assertGreaterEqual(provider["context_limit"], 8192)
 
-        self.assertEqual(["review-model:latest"], [item["name"] for item in result["models"]])
-        model = result["models"][0]
-        self.assertEqual("online", model["status"])
-        self.assertEqual("gguf", model["format"])
-        self.assertEqual("3B", model["parameter_size"])
-        self.assertEqual("Q4_K_M", model["quantization_level"])
-        self.assertEqual(8192, model["context_length"])
-        self.assertEqual(32768, model["max_context_length"])
-        self.assertEqual(456, model["size_vram"])
-
-    def test_hosted_provider_is_normalized_and_rejects_embedded_credentials(self):
-        provider = self.handler._resolve_model_provider(
-            {
-                "model_provider": {
-                    "mode": "hosted",
-                    "base_url": "https://models.example.test/",
-                    "model": "review-model",
-                    "api_key": "session-token",
-                }
-            }
-        )
-
-        self.assertEqual("https://models.example.test/v1", provider["base_url"])
-        self.assertEqual("review-model", provider["model"])
-        self.assertEqual("session-token", provider["api_key"])
-        rejected = self.handler._resolve_model_provider(
-            {"model_provider": {"mode": "hosted", "base_url": "https://user:pass@example.test/v1", "model": "m"}}
-        )
-        self.assertIn("cannot contain credentials", rejected["error"])
-
-    def test_hosted_chat_uses_openai_compatible_contract(self):
+    def test_inference_health_uses_the_configured_endpoint(self):
         captured = {}
 
-        def request_hosted(provider, path, payload=None, timeout=None):
+        def request_endpoint(provider, path, payload=None, timeout=None):
+            captured.update(provider=provider, path=path, timeout=timeout)
+            return {"data": []}
+
+        self.handler._request_provider = request_endpoint
+        result = self.handler._probe_provider()
+
+        self.assertEqual("online", result["status"])
+        self.assertEqual("/models", captured["path"])
+        self.assertIn("editable-inference-endpoint-v1", result["capabilities"])
+
+    def test_inference_settings_can_be_updated_without_disclosing_the_api_key(self):
+        result = self.handler._update_inference_settings({
+            "endpoint": "https://inference.example.test/v1/",
+            "deployment_id": "safety-review",
+            "api_key": "secret-token",
+            "context_limit": 65536,
+            "request_timeout": 15,
+            "review_timeout": 1200,
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("https://inference.example.test/v1", result["endpoint"])
+        self.assertEqual("safety-review", result["deployment_id"])
+        self.assertTrue(result["api_key_configured"])
+        self.assertNotIn("api_key", result)
+        configured = self.handler._configured_provider()
+        self.assertEqual("secret-token", configured["api_key"])
+        self.assertEqual(65536, configured["context_limit"])
+        self.assertEqual(1200, configured["review_timeout"])
+
+    def test_blank_api_key_retains_it_and_explicit_clear_removes_it(self):
+        app_config.replace_inference_settings({
+            **self.original_inference_settings,
+            "api_key": "keep-me",
+        })
+
+        retained = self.handler._update_inference_settings({"api_key": ""})
+        self.assertTrue(retained["api_key_configured"])
+        cleared = self.handler._update_inference_settings({"clear_api_key": True})
+        self.assertFalse(cleared["api_key_configured"])
+        self.assertEqual("", self.handler._configured_provider()["api_key"])
+
+    def test_invalid_inference_settings_do_not_replace_current_values(self):
+        before = app_config.get_inference_settings()
+
+        result = self.handler._update_inference_settings({"endpoint": "file:///etc/passwd"})
+
+        self.assertIn("error", result)
+        self.assertEqual(before, app_config.get_inference_settings())
+
+    def test_reference_store_uses_local_text_retrieval_only(self):
+        result = self.handler._load_rag_content({
+            "store": {
+                "name": "Portable references",
+                "chunks": [
+                    {"id": "rule-1", "source": "standard.md", "content": "Verification shall be independent."},
+                    {"id": "rule-2", "source": "plan.md", "content": "Changes require impact analysis."},
+                ],
+            }
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("local TF-IDF", result["retrieval_mode"])
+        self.assertNotIn("embedding_model", result)
+        self.assertNotIn("vector_chunk_count", result)
+
+    def test_review_request_uses_server_configuration_without_browser_choices(self):
+        captured = {}
+        self.handler._configured_provider = lambda: {
+            "base_url": "https://inference.example.test/v1",
+            "model": "review-service",
+            "api_key": "",
+            "context_limit": 32768,
+            "request_timeout": 12,
+            "review_timeout": 900,
+        }
+
+        def request_chat(provider, payload, timeout):
+            captured.update(provider=provider, payload=payload, timeout=timeout)
+            return {"message": {"content": '{"summary":"Complete","sections":[],"atomic_comments":[]}'}}
+
+        self.handler._request_model_chat = request_chat
+        result = self.handler._build_reviewer_response({
+            "document_text": "LLR-001 The controller shall enter a safe state.",
+            "prompt_mode": "skill",
+            "skill_id": "llr-review",
+            "rag": {"enabled": False},
+        })
+
+        self.assertNotIn("error", result)
+        self.assertEqual("review-service", captured["provider"]["model"])
+        self.assertNotIn("model", result)
+        self.assertNotIn("provider_mode", result)
+
+    def test_review_uses_runtime_context_and_timeout_settings(self):
+        configured = app_config.get_inference_settings()
+        app_config.replace_inference_settings({
+            **configured,
+            "context_limit": 49152,
+            "review_timeout": 321,
+        })
+        captured = {}
+
+        def request_chat(provider, payload, timeout):
+            captured.update(provider=provider, timeout=timeout)
+            return {"message": {"content": json.dumps({
+                "summary": "Complete",
+                "sections": [{"title": "Review", "content": "No actionable issues."}],
+                "atomic_comments": [],
+            })}}
+
+        self.handler._request_model_chat = request_chat
+        result = self.handler._build_reviewer_response({
+            "document_text": "LLR-001 The controller shall enter a safe state.",
+            "prompt_mode": "skill",
+            "skill_id": "llr-review",
+            "rag": {"enabled": False},
+        })
+
+        self.assertNotIn("error", result)
+        self.assertEqual(49152, captured["provider"]["context_limit"])
+        self.assertEqual(321, captured["timeout"])
+        self.assertEqual(49152, result["context_window"])
+
+    def test_configured_endpoint_uses_openai_compatible_contract(self):
+        captured = {}
+
+        def request_endpoint(provider, path, payload=None, timeout=None):
             captured.update(provider=provider, path=path, payload=payload, timeout=timeout)
             return {
                 "choices": [{"message": {"content": '{"summary":"Reviewed"}'}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 4},
             }
 
-        self.handler._request_hosted_server = request_hosted
+        self.handler._request_provider = request_endpoint
         response = self.handler._request_model_chat(
-            {"mode": "hosted", "base_url": "https://models.example.test/v1", "model": "review-model", "api_key": ""},
+            {"base_url": "https://inference.example.test/v1", "model": "review-service", "api_key": ""},
             {
                 "messages": [{"role": "user", "content": "Review this"}],
                 "options": {"temperature": 0, "top_p": 1, "seed": 42, "num_predict": 500},
@@ -106,31 +182,10 @@ class ReviewerLogicTests(unittest.TestCase):
         )
 
         self.assertEqual("/chat/completions", captured["path"])
-        self.assertEqual("review-model", captured["payload"]["model"])
+        self.assertEqual("review-service", captured["payload"]["model"])
         self.assertEqual({"type": "json_object"}, captured["payload"]["response_format"])
-        self.assertEqual(42, captured["payload"]["seed"])
         self.assertEqual('{"summary":"Reviewed"}', response["message"]["content"])
         self.assertEqual(12, response["prompt_eval_count"])
-
-    def test_hosted_health_reports_model_availability(self):
-        self.handler._request_hosted_server = lambda provider, path, timeout=None: {
-            "data": [{"id": "review-model", "max_model_len": 65536}, {"id": "other-model"}]
-        }
-
-        result = self.handler._check_hosted_model_server(
-            {
-                "model_provider": {
-                    "mode": "hosted",
-                    "base_url": "https://models.example.test/v1",
-                    "model": "review-model",
-                }
-            }
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["model_available"])
-        self.assertIn("review-model", result["available_models"])
-        self.assertEqual(65536, result["max_context_length"])
 
     def test_scade_graphical_formats_are_extracted_as_structured_xml(self):
         content = (
@@ -201,72 +256,6 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertIn("section document-level content", normalized)
         self.assertNotIn("not resolved", normalized)
 
-    def test_vector_store_loads_and_reports_dense_metadata(self):
-        result = self.handler._load_rag_content(
-            {
-                "name": "assurance-store.json",
-                "store": {
-                    "name": "Assurance knowledge",
-                    "embedding_model": "nomic-embed-text",
-                    "dimensions": 2,
-                    "chunks": [
-                        {"id": "rule-1", "source": "standard.md", "content": "Verification shall be independent.", "embedding": [1, 0]},
-                        {"id": "rule-2", "source": "plan.md", "content": "Changes require impact analysis.", "embedding": [0, 1]},
-                    ],
-                },
-            }
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(2, result["chunk_count"])
-        self.assertEqual(2, result["vector_chunk_count"])
-        self.assertEqual(2, result["source_count"])
-        self.assertEqual("hybrid dense vector + TF-IDF", result["retrieval_mode"])
-
-    def test_dense_rag_query_uses_embedding_similarity(self):
-        self.handler._load_rag_content(
-            {
-                "store": {
-                    "embedding_model": "embed-model",
-                    "dimensions": 2,
-                    "chunks": [
-                        {"id": "first", "content": "Alpha guidance", "embedding": [1, 0]},
-                        {"id": "second", "content": "Beta guidance", "embedding": [0, 1]},
-                    ],
-                }
-            }
-        )
-        self.handler._request_ollama = lambda path, payload=None, timeout=None: {"embeddings": [[0, 1]]}
-
-        result = self.handler._retrieve_rag_chunks("unrelated query", limit=2)
-
-        self.assertIn("chunk second", result[0])
-
-    def test_knowledge_documents_build_local_vector_index(self):
-        result = self.handler._load_rag_content(
-            {
-                "documents": [
-                    {
-                        "name": "safety-plan.txt",
-                        "document_id": "browser-safety-plan",
-                        "content": "Safety changes shall receive independent impact analysis.",
-                    }
-                ],
-                "append": True,
-            }
-        )
-
-        self.assertTrue(result["loaded"])
-        self.assertGreaterEqual(result["chunk_count"], 1)
-        self.assertEqual("local TF-IDF vector", result["retrieval_mode"])
-        document = result["documents"][0]
-        self.assertEqual("browser-safety-plan", document["document_id"])
-        self.assertEqual("safety-plan.txt", document["name"])
-        self.assertEqual(1, document["chunk_count"])
-        self.assertGreater(document["token_count"], 0)
-        self.assertEqual("browser-safety-plan-chunk-1", document["chunks"][0]["id"])
-        self.assertGreater(document["chunks"][0]["token_count"], 0)
-
     def test_removing_a_rag_document_deletes_only_its_associated_chunks(self):
         self.handler._load_rag_content(
             {
@@ -286,22 +275,6 @@ class ReviewerLogicTests(unittest.TestCase):
         retrieved = self.handler._retrieve_rag_chunks("rule", limit=10)
         self.assertTrue(all("first.txt" not in chunk for chunk in retrieved))
         self.assertTrue(any("second.txt" in chunk for chunk in retrieved))
-
-    def test_portable_vector_sources_are_exposed_as_removable_documents(self):
-        result = self.handler._load_rag_content(
-            {
-                "store": {
-                    "chunks": [
-                        {"source": "standard.md", "content": "Rule one"},
-                        {"source": "standard.md", "content": "Rule two"},
-                    ]
-                }
-            }
-        )
-
-        self.assertEqual(1, result["source_count"])
-        self.assertEqual("standard.md", result["documents"][0]["name"])
-        self.assertEqual(2, result["documents"][0]["chunk_count"])
 
     def test_retrieval_budget_keeps_highest_ranked_complete_chunks(self):
         chunks = ["A" * 20, "B" * 20, "C" * 20]
@@ -347,227 +320,6 @@ class ReviewerLogicTests(unittest.TestCase):
         )
 
         self.assertEqual(set(references[:2]), set(ranked))
-
-    def test_review_injects_retrieved_rag_evidence_with_provenance(self):
-        self.handler._load_rag_content(
-            {
-                "documents": [
-                    {"name": "project-standard.txt", "content": "Independent verification shall cover every safety requirement."}
-                ]
-            }
-        )
-        self.handler._check_model_readiness = lambda model: {"ready": True, "reason": "ready"}
-        captured = {}
-
-        def request_ollama(path, payload=None, timeout=None):
-            captured["payload"] = payload
-            return {
-                "message": {
-                    "content": json.dumps({"summary": "Reviewed", "sections": [], "atomic_comments": []})
-                }
-            }
-
-        self.handler._request_ollama = request_ollama
-
-        result = self.handler._build_reviewer_response(
-            {
-                "model": "review-model",
-                "prompt_mode": "skill",
-                "skill_id": "general-review",
-                "document_text": "LLR-001 shall be independently verified.",
-                "rag": {"enabled": True, "max_chunks": 12},
-            }
-        )
-
-        prompt = captured["payload"]["messages"][1]["content"]
-        self.assertIn("[RAG: project-standard.txt", prompt)
-        self.assertIn("Independent verification shall cover every safety requirement", prompt)
-        self.assertGreaterEqual(result["retrieval"]["selected_chunks"], 1)
-        self.assertEqual("section-aware staged retrieval", result["retrieval"]["relevance_stepthrough"]["strategy"])
-        self.assertGreaterEqual(result["retrieval"]["relevance_stepthrough"]["target_chunks_scanned"], 1)
-
-    def test_review_can_use_hosted_provider_without_local_readiness_check(self):
-        self.handler._check_model_readiness = lambda model: self.fail("Hosted reviews must not check local Ollama readiness")
-        captured = {}
-
-        def request_model_chat(provider, payload, timeout):
-            captured.update(provider=provider, payload=payload, timeout=timeout)
-            return {"message": {"content": json.dumps({"summary": "Hosted review", "sections": [], "atomic_comments": []})}}
-
-        self.handler._request_model_chat = request_model_chat
-        result = self.handler._build_reviewer_response(
-            {
-                "model": "hosted-review-model",
-                "model_provider": {
-                    "mode": "hosted",
-                    "base_url": "https://models.example.test/v1",
-                    "model": "hosted-review-model",
-                    "api_key": "temporary",
-                },
-                "prompt_mode": "skill",
-                "skill_id": "general-review",
-                "document_text": "LLR-001 shall reject invalid input.",
-                "rag": {"enabled": False},
-            }
-        )
-
-        self.assertEqual("Hosted review", result["review"])
-        self.assertEqual("hosted", result["provider_mode"])
-        self.assertEqual("hosted", captured["provider"]["mode"])
-        self.assertEqual("hosted-review-model", captured["payload"]["model"])
-
-    def test_hosted_model_receives_retrieved_vector_store_context(self):
-        self.handler._load_rag_content(
-            {"documents": [{"name": "hosted-standard.txt", "content": "Every safety change shall be verified independently."}]}
-        )
-        self.handler._check_model_readiness = lambda model: self.fail("Hosted reviews must not check local Ollama readiness")
-        captured = {}
-
-        def request_model_chat(provider, payload, timeout):
-            captured["payload"] = payload
-            return {"message": {"content": json.dumps({"summary": "Hosted review", "sections": [], "atomic_comments": []})}}
-
-        self.handler._request_model_chat = request_model_chat
-        result = self.handler._build_reviewer_response(
-            {
-                "model_provider": {
-                    "mode": "hosted",
-                    "base_url": "https://models.example.test/v1",
-                    "model": "hosted-review-model",
-                },
-                "prompt_mode": "skill",
-                "skill_id": "general-review",
-                "document_text": "LLR-001 changes safety behaviour.",
-                "rag": {"enabled": True, "max_chunks": 12},
-            }
-        )
-
-        prompt = captured["payload"]["messages"][1]["content"]
-        self.assertIn("[RAG: hosted-standard.txt", prompt)
-        self.assertGreaterEqual(result["retrieval"]["selected_chunks"], 1)
-
-    def test_perfect_benchmark_output_scores_one_hundred(self):
-        output = {
-            "findings": [
-                {"requirement_id": requirement_id, "rule_id": rule_id}
-                for requirement_id, rule_id in server.BENCHMARK_EXPECTED_FINDINGS
-            ],
-            "pass_ids": sorted(server.BENCHMARK_CONTROL_IDS),
-        }
-
-        result = self.handler._score_benchmark_output(output)
-
-        self.assertEqual(100.0, result["score"])
-        self.assertEqual(100.0, result["precision_percent"])
-        self.assertEqual(100.0, result["recall_percent"])
-        self.assertEqual(100.0, result["control_accuracy_percent"])
-
-    def test_benchmark_penalizes_missed_and_unexpected_findings(self):
-        output = {
-            "findings": [
-                {"requirement_id": "LLR-B01", "rule_id": "BENCH-R1"},
-                {"requirement_id": "LLR-B05", "rule_id": "BENCH-R2"},
-            ],
-            "pass_ids": ["LLR-B06"],
-        }
-
-        result = self.handler._score_benchmark_output(output)
-
-        self.assertLess(result["score"], 50)
-        self.assertEqual(1, result["true_positive_count"])
-        self.assertEqual(1, result["false_positive_count"])
-        self.assertEqual(3, result["missed_count"])
-        self.assertEqual(50.0, result["control_accuracy_percent"])
-
-    def test_model_benchmark_uses_repeatable_generation_settings(self):
-        self.handler._start_model = lambda body: {"ok": True, "status": "ready"}
-        captured = {}
-
-        def request_ollama(path, payload=None, timeout=None):
-            captured["path"] = path
-            captured["payload"] = payload
-            captured["timeout"] = timeout
-            return {
-                "message": {
-                    "content": json.dumps(
-                        {
-                            "findings": [
-                                {"requirement_id": requirement_id, "rule_id": rule_id}
-                                for requirement_id, rule_id in server.BENCHMARK_EXPECTED_FINDINGS
-                            ],
-                            "pass_ids": sorted(server.BENCHMARK_CONTROL_IDS),
-                        }
-                    )
-                }
-            }
-
-        self.handler._request_ollama = request_ollama
-
-        result = self.handler._run_model_benchmark({"model": "benchmark-model"})
-
-        self.assertEqual(100.0, result["score"])
-        self.assertEqual("/api/chat", captured["path"])
-        self.assertEqual(0, captured["payload"]["options"]["temperature"])
-        self.assertEqual(42, captured["payload"]["options"]["seed"])
-        self.assertEqual(32768, captured["payload"]["options"]["num_ctx"])
-        self.assertEqual(server.OLLAMA_BENCHMARK_TIMEOUT_SECONDS, captured["timeout"])
-
-    def test_hosted_benchmark_skips_local_model_start(self):
-        self.handler._start_model = lambda body: self.fail("Hosted benchmarks must not start a local model")
-
-        def request_model_chat(provider, payload, timeout):
-            return {
-                "message": {
-                    "content": json.dumps(
-                        {
-                            "findings": [
-                                {"requirement_id": requirement_id, "rule_id": rule_id}
-                                for requirement_id, rule_id in server.BENCHMARK_EXPECTED_FINDINGS
-                            ],
-                            "pass_ids": sorted(server.BENCHMARK_CONTROL_IDS),
-                        }
-                    )
-                }
-            }
-
-        self.handler._request_model_chat = request_model_chat
-        result = self.handler._run_model_benchmark(
-            {
-                "model_provider": {
-                    "mode": "hosted",
-                    "base_url": "https://models.example.test/v1",
-                    "model": "hosted-benchmark-model",
-                }
-            }
-        )
-
-        self.assertEqual(100.0, result["score"])
-        self.assertEqual("hosted", result["provider_mode"])
-        self.assertEqual(32768, result["context_window"])
-
-    def test_review_context_window_can_be_raised_to_128k(self):
-        self.assertEqual(131072, self.handler._resolve_review_context_window({"context_window": 131072}))
-        options = self.handler._build_review_model_options(prompt_length=1000, context_window=131072)
-        self.assertEqual(131072, options["num_ctx"])
-
-        with self.assertRaisesRegex(ValueError, "between 8,192 and 131,072"):
-            self.handler._resolve_review_context_window({"context_window": 262144})
-
-        with self.assertRaisesRegex(ValueError, "supports at most 32,768"):
-            self.handler._resolve_review_context_window({"context_window": 65536}, model_context_limit=32768)
-
-    def test_model_warmup_uses_selected_context_window(self):
-        captured = {}
-
-        def request_ollama(path, payload=None, timeout=None):
-            captured.update(path=path, payload=payload, timeout=timeout)
-            return {"done": True}
-
-        self.handler._request_ollama = request_ollama
-        self.handler._load_model("review-model", 65536)
-
-        self.assertEqual("/api/generate", captured["path"])
-        self.assertEqual(65536, captured["payload"]["options"]["num_ctx"])
 
     def test_larger_context_increases_retrieval_budget(self):
         budget_32k = self.handler._calculate_retrieval_budget(1000, 1000, 32768)
@@ -779,7 +531,6 @@ class ReviewerLogicTests(unittest.TestCase):
         self.assertIn("Never create an atomic_comments_summary section", prompt)
 
     def test_review_repairs_atomic_comments_omitted_after_long_sections(self):
-        self.handler._check_model_readiness = lambda model: {"ready": True, "reason": "ready"}
         requests = []
 
         def request_model_chat(provider, payload, timeout):
@@ -987,14 +738,62 @@ class StaticServerTests(unittest.TestCase):
         self.assertEqual(200, response.status)
         self.assertIn("<title>ASCS Reviewer</title>", content)
 
-    def test_sections_are_full_width_with_tooling_first(self):
+    def test_portable_source_excludes_legacy_backend_and_browser_choice_controls(self):
+        prohibited = (
+            "olla" + "ma",
+            "model" + "Select",
+            "provider" + "ModeBtn",
+            "hosted" + "Model",
+        )
+        source_files = [
+            path for path in PROJECT_DIR.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".py", ".js", ".html", ".css", ".md"}
+        ]
+
+        for source_file in source_files:
+            content = source_file.read_text(encoding="utf-8").lower()
+            for token in prohibited:
+                self.assertNotIn(token.lower(), content, f"{token} remains in {source_file}")
+
+    def test_linux_launcher_is_position_independent(self):
+        launcher = (PROJECT_DIR / "run.sh").read_text(encoding="utf-8")
+
+        self.assertTrue(launcher.startswith("#!/usr/bin/env sh\n"))
+        self.assertIn('dirname -- "$0"', launcher)
+        self.assertIn('exec python3 "$SCRIPT_DIR/server.py"', launcher)
+
+    def test_portable_sections_show_editable_inference_service(self):
         content = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
 
-        self.assertNotIn('class="grid"', content)
-        self.assertLess(content.index("1. Tooling"), content.index("2. Reference documents and vector index"))
-        self.assertLess(content.index("2. Reference documents and vector index"), content.index("3. Model access"))
-        self.assertLess(content.index("3. Model access"), content.index("4. Review setup"))
-        self.assertNotIn("Local, structured review", content)
+        self.assertLess(content.index("2. Reference documents and local index"), content.index("3. Inference service"))
+        self.assertLess(content.index("3. Inference service"), content.index("4. Review setup"))
+        self.assertIn('id="healthBtn"', content)
+        self.assertIn('id="inferenceSettingsForm"', content)
+        self.assertIn('id="inferenceEndpoint"', content)
+        self.assertIn('id="inferenceDeploymentId"', content)
+        self.assertIn('id="inferenceApiKey"', content)
+
+    def test_inference_settings_endpoint_updates_and_redacts_credentials(self):
+        original = app_config.get_inference_settings()
+        try:
+            updated = self._post_json("/api/inference/settings", {
+                "endpoint": "https://portable.example.test/v1",
+                "deployment_id": "portable-review",
+                "api_key": "browser-supplied-secret",
+                "context_limit": 49152,
+                "request_timeout": 18,
+                "review_timeout": 1000,
+            })
+            with urllib.request.urlopen(f"{self.base_url}/api/inference/settings", timeout=2) as response:
+                loaded = json.loads(response.read().decode("utf-8"))
+
+            self.assertTrue(updated["ok"])
+            self.assertEqual("https://portable.example.test/v1", loaded["endpoint"])
+            self.assertEqual("portable-review", loaded["deployment_id"])
+            self.assertTrue(loaded["api_key_configured"])
+            self.assertNotIn("api_key", loaded)
+        finally:
+            app_config.replace_inference_settings(original)
 
     def test_optional_standards_context_option_is_removed(self):
         html = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
@@ -1027,33 +826,6 @@ class StaticServerTests(unittest.TestCase):
         self.assertIn("Text-based documents", content)
         self.assertIn("Direct text entry", content)
 
-    def test_model_controls_have_consistent_buttons_and_reserved_scrollbar_space(self):
-        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
-        stylesheet = (PROJECT_DIR / "styles.css").read_text(encoding="utf-8")
-
-        self.assertEqual(4, javascript.count("secondary model-action"))
-        self.assertIn("scrollbar-gutter: stable", stylesheet)
-        self.assertRegex(stylesheet, r"\.model-actions > \.model-action\s*\{[^}]*flex:\s*0 0 5\.5rem")
-        self.assertRegex(stylesheet, r"\.model-actions > \.model-action-ready\s*\{[^}]*width:\s*7rem")
-        self.assertRegex(stylesheet, r"\.model-list\s*\{[^}]*overflow-x:\s*hidden")
-        self.assertIn("renderModelMetadata(model)", javascript)
-        self.assertIn('data-action="benchmark">Test</button>', javascript)
-
-    def test_model_access_supports_local_and_hosted_modes(self):
-        html = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
-        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
-
-        self.assertIn('id="providerModeBtn"', html)
-        self.assertIn('id="hostedBaseUrl"', html)
-        self.assertIn('id="hostedModel"', html)
-        self.assertIn('id="hostedApiKey"', html)
-        self.assertIn('id="contextWindow"', html)
-        self.assertIn('id="contextWindowStatus"', html)
-        self.assertIn('id="hostedContextLimit"', html)
-        self.assertIn("model_provider: modelProvider", javascript)
-        self.assertIn("option.disabled = !contextLimit", javascript)
-        self.assertNotIn("hostedApiKey: hostedApiKey.value", javascript)
-
     def test_reference_list_is_the_only_document_indexing_workflow(self):
         html = (PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
@@ -1079,7 +851,7 @@ class StaticServerTests(unittest.TestCase):
         self.assertIn("async function runReview()", content)
 
     def test_browser_modules_are_served_from_an_explicit_allowlist(self):
-        for module in ("config", "documents", "providers", "rendering", "reviews"):
+        for module in ("config", "documents", "rendering", "reviews"):
             with self.subTest(module=module):
                 with urllib.request.urlopen(f"{self.base_url}/browser/{module}.js", timeout=2) as response:
                     content = response.read().decode("utf-8")
@@ -1148,18 +920,6 @@ class StaticServerTests(unittest.TestCase):
         )
         with urllib.request.urlopen(request, timeout=2) as response:
             return json.loads(response.read().decode("utf-8"))
-
-    def test_health_advertises_benchmark_and_rag_capabilities(self):
-        with urllib.request.urlopen(f"{self.base_url}/api/health", timeout=2) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-
-        self.assertEqual(server.API_VERSION, payload["api_version"])
-        self.assertIn("model-benchmark-v1", payload["capabilities"])
-        self.assertIn("rag-store-v1", payload["capabilities"])
-        self.assertIn("rag-document-lifecycle-v1", payload["capabilities"])
-        self.assertIn("hosted-model-v1", payload["capabilities"])
-        self.assertIn("context-window-v1", payload["capabilities"])
-        self.assertIn("model-context-discovery-v1", payload["capabilities"])
 
     def test_skill_definitions_are_served(self):
         with urllib.request.urlopen(f"{self.base_url}/api/skills", timeout=2) as response:

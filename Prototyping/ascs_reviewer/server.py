@@ -2,17 +2,9 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app_config import (
-    # Compatibility exports retained for existing integrations and tests.
-    API_CAPABILITIES,
     API_VERSION,
     APP_HOST,
     APP_PORT,
-    BENCHMARK_CONTROL_IDS,
-    BENCHMARK_EXPECTED_FINDINGS,
-    MODEL_CONTEXT_CACHE,
-    MODEL_CONTEXT_CACHE_LOCK,
-    OLLAMA_BASE_URL,
-    OLLAMA_BENCHMARK_TIMEOUT_SECONDS,
     STATIC_FILES,
 )
 from document_processing import (
@@ -23,23 +15,24 @@ from document_processing import (
     SCADE_XML_EXTENSIONS,
     WORD_EXTENSIONS,
 )
-from model_providers import ModelProviderMixin
+from inference_client import InferenceClientMixin
 from retrieval import RetrievalMixin
 from review_results import ReviewResultMixin
 from review_service import ReviewServiceMixin, SKILL_STORE
 from traceability import TraceabilityMixin
 from skill_store import SCHEMA_VERSION, SkillValidationError
 
-class ASCSReviewerHandler(ReviewServiceMixin, ReviewResultMixin, RetrievalMixin, TraceabilityMixin, ModelProviderMixin, DocumentProcessingMixin, BaseHTTPRequestHandler):
+class ASCSReviewerHandler(ReviewServiceMixin, ReviewResultMixin, RetrievalMixin, TraceabilityMixin, InferenceClientMixin, DocumentProcessingMixin, BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
 
-        if path == "/api/models":
-            self._send_json(self._get_model_status())
+        if path == "/api/health":
+            self._send_json(self._probe_provider())
             return
 
-        if path == "/api/health":
-            self._send_json(self._probe_ollama())
+        if path == "/api/inference/settings":
+            settings = self._get_inference_settings()
+            self._send_json(settings, status=400 if settings.get("error") else 200)
             return
 
         if path == "/api/skills":
@@ -60,44 +53,20 @@ class ASCSReviewerHandler(ReviewServiceMixin, ReviewResultMixin, RetrievalMixin,
     def do_POST(self):
         path = self.path.split("?", 1)[0]
 
-        if path == "/api/chat":
-            body = self._read_json_body()
-            self._send_json(self._request_ollama("/api/chat", body))
-            return
-
         if path == "/api/reviewer/review":
             body = self._read_json_body()
             self._send_json(self._build_reviewer_response(body))
             return
 
+        if path == "/api/inference/settings":
+            body = self._read_json_body()
+            result = self._update_inference_settings(body)
+            self._send_json(result, status=400 if result.get("error") else 200)
+            return
+
         if path == "/api/traceability/analyze":
             body = self._read_json_body()
             self._send_json(self._build_traceability_response(body))
-            return
-
-        if path == "/api/models/start":
-            body = self._read_json_body()
-            self._send_json(self._start_model(body))
-            return
-
-        if path == "/api/models/stop":
-            body = self._read_json_body()
-            self._send_json(self._stop_model(body))
-            return
-
-        if path == "/api/models/ready":
-            body = self._read_json_body()
-            self._send_json(self._check_model_ready(body))
-            return
-
-        if path == "/api/models/benchmark":
-            body = self._read_json_body()
-            self._send_json(self._run_model_benchmark(body))
-            return
-
-        if path == "/api/hosted/health":
-            body = self._read_json_body()
-            self._send_json(self._check_hosted_model_server(body))
             return
 
         if path == "/api/rag/load":
@@ -176,7 +145,8 @@ def main():
     server = ThreadingHTTPServer((APP_HOST, APP_PORT), ASCSReviewerHandler)
     display_host = "127.0.0.1" if APP_HOST in {"0.0.0.0", "::"} else APP_HOST
     print(f"ASCS Reviewer running at http://{display_host}:{APP_PORT}")
-    print(f"Using Ollama at {OLLAMA_BASE_URL}")
+    settings = InferenceClientMixin._configured_provider()
+    print(f"Inference endpoint: {settings.get('base_url', 'misconfigured')}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

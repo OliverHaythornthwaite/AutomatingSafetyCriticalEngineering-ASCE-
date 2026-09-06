@@ -1,4 +1,4 @@
-"""Central application configuration and process-local shared state."""
+"""Portable application configuration and process-local state."""
 
 import os
 import threading
@@ -11,6 +11,7 @@ STYLES_FILE = ROOT / "styles.css"
 SCRIPT_FILE = ROOT / "app.js"
 SKILLS_DIRECTORY = ROOT / "skills"
 BROWSER_DIRECTORY = ROOT / "browser"
+
 STATIC_FILES = {
     "/": INDEX_FILE,
     "/index.html": INDEX_FILE,
@@ -18,7 +19,6 @@ STATIC_FILES = {
     "/app.js": SCRIPT_FILE,
     "/browser/config.js": BROWSER_DIRECTORY / "config.js",
     "/browser/documents.js": BROWSER_DIRECTORY / "documents.js",
-    "/browser/providers.js": BROWSER_DIRECTORY / "providers.js",
     "/browser/rendering.js": BROWSER_DIRECTORY / "rendering.js",
     "/browser/reviews.js": BROWSER_DIRECTORY / "reviews.js",
 }
@@ -26,43 +26,50 @@ STATIC_FILES = {
 APP_HOST = os.environ.get("ASCS_REVIEWER_HOST", "127.0.0.1")
 APP_PORT = int(os.environ.get("ASCS_REVIEWER_PORT", "8000"))
 
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-REQUEST_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_REQUEST_TIMEOUT", "12"))
-OLLAMA_LOAD_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_LOAD_TIMEOUT", "120"))
-OLLAMA_READY_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_READY_TIMEOUT", "45"))
-OLLAMA_REVIEW_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_REVIEW_TIMEOUT", "900"))
-OLLAMA_BENCHMARK_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_BENCHMARK_TIMEOUT", "180"))
-OLLAMA_STOP_TIMEOUT_SECONDS = float(os.environ.get("OLLAMA_STOP_TIMEOUT", "30"))
-MODEL_KEEP_ALIVE = os.environ.get("OLLAMA_MODEL_KEEP_ALIVE", "10m")
-OLLAMA_REVIEW_MIN_NUM_CTX = int(os.environ.get("OLLAMA_REVIEW_MIN_NUM_CTX", "8192"))
-OLLAMA_REVIEW_DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_REVIEW_DEFAULT_NUM_CTX", "32768"))
-OLLAMA_REVIEW_MAX_NUM_CTX = int(os.environ.get("OLLAMA_REVIEW_MAX_NUM_CTX", "131072"))
-OLLAMA_REVIEW_NUM_PREDICT = int(os.environ.get("OLLAMA_REVIEW_NUM_PREDICT", "8192"))
-OLLAMA_REVIEW_TEMPERATURE = float(os.environ.get("OLLAMA_REVIEW_TEMPERATURE", "0"))
-OLLAMA_REVIEW_TOP_P = float(os.environ.get("OLLAMA_REVIEW_TOP_P", "0.9"))
-OLLAMA_REVIEW_REPEAT_PENALTY = float(os.environ.get("OLLAMA_REVIEW_REPEAT_PENALTY", "1.05"))
+MODEL_ENDPOINT_URL = os.environ.get("ASCS_MODEL_ENDPOINT", "http://127.0.0.1:8001/v1").rstrip("/")
+MODEL_ID = os.environ.get("ASCS_MODEL_ID", "review-model")
+MODEL_API_KEY = os.environ.get("ASCS_MODEL_API_KEY", "")
+MODEL_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("ASCS_MODEL_REQUEST_TIMEOUT", "12"))
+MODEL_REVIEW_TIMEOUT_SECONDS = float(os.environ.get("ASCS_MODEL_REVIEW_TIMEOUT", "900"))
+MODEL_CONTEXT_LIMIT = int(os.environ.get("ASCS_MODEL_CONTEXT_LIMIT", "32768"))
+REVIEW_MIN_CONTEXT = 8192 # Todo: Configure according to API
+REVIEW_MAX_CONTEXT = 131072  # Todo: Configure according to API
+REVIEW_MAX_OUTPUT_TOKENS = int(os.environ.get("ASCS_REVIEW_MAX_OUTPUT_TOKENS", "8192"))
+REVIEW_TEMPERATURE = float(os.environ.get("ASCS_REVIEW_TEMPERATURE", "0"))
+REVIEW_TOP_P = float(os.environ.get("ASCS_REVIEW_TOP_P", "0.9"))
 
 APPROX_CHARS_PER_TOKEN = 4
 RAG_MAX_CHUNKS = 10_000
 RAG_MAX_CONTENT_CHARS = 20_000_000
-RAG_MAX_VECTOR_DIMENSIONS = 8_192
-
 RAG_LOCK = threading.Lock()
-RAG_STORE = {
-    "name": "",
-    "embedding_model": "",
-    "dimensions": 0,
-    "chunks": [],
-}
-MODEL_CONTEXT_CACHE_LOCK = threading.Lock()
-MODEL_CONTEXT_CACHE = {}
+RAG_STORE = {"name": "", "chunks": []}
 
-API_VERSION = "1.7"
+INFERENCE_SETTINGS_LOCK = threading.RLock()
+INFERENCE_SETTINGS = {
+    "base_url": MODEL_ENDPOINT_URL,
+    "model": MODEL_ID,
+    "api_key": MODEL_API_KEY,
+    "context_limit": MODEL_CONTEXT_LIMIT,
+    "request_timeout": MODEL_REQUEST_TIMEOUT_SECONDS,
+    "review_timeout": MODEL_REVIEW_TIMEOUT_SECONDS,
+}
+
+
+def get_inference_settings():
+    """Return an atomic snapshot of the process-local inference settings."""
+    with INFERENCE_SETTINGS_LOCK:
+        return dict(INFERENCE_SETTINGS)
+
+
+def replace_inference_settings(settings):
+    """Replace the process-local inference settings after caller validation."""
+    with INFERENCE_SETTINGS_LOCK:
+        INFERENCE_SETTINGS.clear()
+        INFERENCE_SETTINGS.update(settings)
+
+API_VERSION = "2.0-portable"
 API_CAPABILITIES = [
-    "context-window-v1",
-    "model-context-discovery-v1",
-    "hosted-model-v1",
-    "model-benchmark-v1",
+    "editable-inference-endpoint-v1",
     "rag-store-v1",
     "rag-document-lifecycle-v1",
     "indexed-reference-workflow-v1",
@@ -70,14 +77,5 @@ API_CAPABILITIES = [
     "chunk-token-count-v1",
     "scade-parser-v1",
 ]
-
-BENCHMARK_VERSION = "1.0"
-BENCHMARK_EXPECTED_FINDINGS = {
-    ("LLR-B01", "BENCH-R1"): "Undefined zero-divisor behaviour",
-    ("LLR-B02", "BENCH-R2"): "Unmeasurable timing requirement",
-    ("LLR-B03", "BENCH-R3"): "Undefined invalid-input safe state",
-    ("LLR-B04", "BENCH-R4"): "Missing parent traceability",
-}
-BENCHMARK_CONTROL_IDS = {"LLR-B05", "LLR-B06"}
 
 ARTEFACT_ORDER = {"SRATS": 0, "SR": 0, "HLR": 1, "LLR": 2, "LLRV": 3}

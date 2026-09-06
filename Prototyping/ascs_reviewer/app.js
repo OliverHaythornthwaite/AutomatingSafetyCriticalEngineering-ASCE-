@@ -1,14 +1,20 @@
 import { readConfig, writeConfig } from './browser/config.js';
 import { createRagDocumentId, getSelectedEntryIndex, readFileAsDocument } from './browser/documents.js';
-import { buildModelProvider, formatModelDate, formatModelDateTime, validateHostedProvider } from './browser/providers.js';
-import { escapeHtml, featureErrorMessage, formatByteSize, stripPageFromLocation } from './browser/rendering.js';
+import { escapeHtml, featureErrorMessage, stripPageFromLocation } from './browser/rendering.js';
 import { normalizeReviewResultForDisplay, parseStructuredReviewJson } from './browser/reviews.js';
 
-const modelSelect = document.getElementById('modelSelect');
-const modelsPane = document.getElementById('models');
 const healthStatus = document.getElementById('healthStatus');
+const inferenceSettingsForm = document.getElementById('inferenceSettingsForm');
+const inferenceEndpoint = document.getElementById('inferenceEndpoint');
+const inferenceDeploymentId = document.getElementById('inferenceDeploymentId');
+const inferenceContextLimit = document.getElementById('inferenceContextLimit');
+const inferenceRequestTimeout = document.getElementById('inferenceRequestTimeout');
+const inferenceReviewTimeout = document.getElementById('inferenceReviewTimeout');
+const inferenceApiKey = document.getElementById('inferenceApiKey');
+const clearInferenceApiKey = document.getElementById('clearInferenceApiKey');
+const inferenceKeyStatus = document.getElementById('inferenceKeyStatus');
+const saveInferenceSettingsBtn = document.getElementById('saveInferenceSettingsBtn');
 const reviewStatus = document.getElementById('reviewStatus');
-let currentModels = [];
 const reviewOutput = document.getElementById('reviewOutput');
 const traceabilityPanel = document.getElementById('traceabilityPanel');
 const traceabilityOutput = document.getElementById('traceabilityOutput');
@@ -38,24 +44,6 @@ const ragStatus = document.getElementById('ragStatus');
 const chunkTokenDetails = document.getElementById('chunkTokenDetails');
 const ragEnabled = document.getElementById('ragEnabled');
 const ragScope = document.getElementById('ragScope');
-const benchmarkStatus = document.getElementById('benchmarkStatus');
-const benchmarkResultsBody = document.getElementById('benchmarkResults');
-const providerModeBtn = document.getElementById('providerModeBtn');
-const providerModeLabel = document.getElementById('providerModeLabel');
-const ollamaAccessPanel = document.getElementById('ollamaAccessPanel');
-const hostedAccessPanel = document.getElementById('hostedAccessPanel');
-const hostedBaseUrl = document.getElementById('hostedBaseUrl');
-const hostedModel = document.getElementById('hostedModel');
-const hostedApiKey = document.getElementById('hostedApiKey');
-const hostedHealthBtn = document.getElementById('hostedHealthBtn');
-const hostedBenchmarkBtn = document.getElementById('hostedBenchmarkBtn');
-const hostedStatus = document.getElementById('hostedStatus');
-const ollamaModelSelection = document.getElementById('ollamaModelSelection');
-const hostedModelSelection = document.getElementById('hostedModelSelection');
-const hostedModelSummary = document.getElementById('hostedModelSummary');
-const contextWindow = document.getElementById('contextWindow');
-const contextWindowStatus = document.getElementById('contextWindowStatus');
-const hostedContextLimit = document.getElementById('hostedContextLimit');
 const reviewDocuments = [];
 const referenceEntries = [];
 let indexedReferenceDocuments = [];
@@ -63,19 +51,13 @@ let reviewSkills = [];
 let skillAnswerSets = {};
 let reviewInputMode = 'files';
 let promptMode = 'skill';
-let preferredModelName = '';
 let preferredSkillId = 'general-review';
 let renderedSkillId = '';
-let modelAccessMode = 'ollama';
-let hostedDetectedModelName = '';
-let preferredContextWindow = 32768;
-const benchmarkResults = new Map();
-const REQUIRED_SERVER_CAPABILITIES = ['context-window-v1', 'model-context-discovery-v1', 'hosted-model-v1', 'model-benchmark-v1', 'rag-store-v1', 'rag-document-lifecycle-v1', 'indexed-reference-workflow-v1', 'staged-retrieval-v1', 'chunk-token-count-v1'];
+const REQUIRED_SERVER_CAPABILITIES = ['editable-inference-endpoint-v1', 'rag-store-v1', 'rag-document-lifecycle-v1', 'indexed-reference-workflow-v1', 'staged-retrieval-v1', 'chunk-token-count-v1'];
 
 function saveConfig() {
   captureCurrentSkillAnswers();
   const config = {
-    selectedModel: modelSelect.value || '',
     promptMode,
     selectedSkillId: skillSelect.value || preferredSkillId,
     skillAnswerSets,
@@ -84,11 +66,6 @@ function saveConfig() {
     reviewInputMode,
     ragEnabled: ragEnabled.checked,
     ragScope: ragScope.value,
-    modelAccessMode,
-    hostedBaseUrl: hostedBaseUrl.value.trim(),
-    hostedModel: hostedModel.value.trim(),
-    contextWindow: contextWindow.value,
-    hostedContextLimit: hostedContextLimit.value,
   };
   writeConfig(config);
   reviewStatus.textContent = 'Configuration saved.';
@@ -103,28 +80,6 @@ function applyConfig(config) {
   }
   if (config.reviewInputMode === 'text' || config.reviewInputMode === 'files') {
     setReviewInputMode(config.reviewInputMode);
-  }
-  if (typeof config.selectedModel === 'string') {
-    preferredModelName = config.selectedModel;
-  }
-  if (typeof config.hostedBaseUrl === 'string' && config.hostedBaseUrl.trim()) {
-    hostedBaseUrl.value = config.hostedBaseUrl.trim();
-  }
-  if (typeof config.hostedModel === 'string') {
-    hostedModel.value = config.hostedModel;
-  }
-  if (config.modelAccessMode === 'hosted' || config.modelAccessMode === 'ollama') {
-    setModelAccessMode(config.modelAccessMode);
-  }
-  const savedContextWindow = Number(config.contextWindow);
-  if (savedContextWindow >= 8192 && savedContextWindow <= 131072) {
-    preferredContextWindow = savedContextWindow;
-    if (Array.from(contextWindow.options).some((option) => Number(option.value) === savedContextWindow)) {
-      contextWindow.value = String(savedContextWindow);
-    }
-  }
-  if (config.hostedContextLimit && Number(config.hostedContextLimit) > 0) {
-    hostedContextLimit.value = String(config.hostedContextLimit);
   }
   if (typeof config.ragEnabled === 'boolean') {
     ragEnabled.checked = config.ragEnabled;
@@ -143,131 +98,6 @@ function applyConfig(config) {
   }
   if (config.customPrompt && typeof config.customPrompt === 'object') {
     setCustomPrompt(config.customPrompt);
-  }
-}
-
-function buildModelProviderPayload() {
-  if (modelAccessMode === 'hosted') {
-    return buildModelProvider({ mode: 'hosted', baseUrl: hostedBaseUrl.value, model: hostedModel.value, apiKey: hostedApiKey.value, contextLimit: hostedContextLimit.value });
-  }
-  const selectedModel = currentModels.find((model) => model.name === modelSelect.value);
-  return buildModelProvider({ mode: 'ollama', model: modelSelect.value, contextLimit: selectedModel?.max_context_length });
-}
-
-function syncHostedModelSummary() {
-  const modelName = hostedModel.value.trim();
-  const serverName = hostedBaseUrl.value.trim();
-  hostedModelSummary.value = modelName
-    ? `${modelName}${serverName ? ` via ${serverName}` : ''}`
-    : 'Configure the hosted model in Model access';
-}
-
-function getActiveContextLimit() {
-  if (modelAccessMode === 'hosted') {
-    return Number(hostedContextLimit.value) || null;
-  }
-  const selectedModel = currentModels.find((model) => model.name === modelSelect.value);
-  return Number(selectedModel?.max_context_length) || null;
-}
-
-function syncContextWindowOptions() {
-  const contextLimit = getActiveContextLimit();
-  const previousSelection = preferredContextWindow;
-  contextWindow.querySelectorAll('option[data-model-maximum]').forEach((option) => option.remove());
-  const hasExactOption = Array.from(contextWindow.options).some((option) => Number(option.value) === contextLimit);
-  if (contextLimit && contextLimit >= 8192 && contextLimit <= 131072 && !hasExactOption) {
-    const maximumOption = document.createElement('option');
-    maximumOption.value = String(contextLimit);
-    maximumOption.dataset.modelMaximum = 'true';
-    maximumOption.textContent = `${Number.isInteger(contextLimit / 1024) ? `${contextLimit / 1024}K` : contextLimit.toLocaleString()} tokens — model maximum`;
-    contextWindow.appendChild(maximumOption);
-    Array.from(contextWindow.options)
-      .sort((left, right) => Number(left.value) - Number(right.value))
-      .forEach((option) => contextWindow.appendChild(option));
-  }
-  const options = Array.from(contextWindow.options);
-  options.forEach((option) => {
-    option.disabled = !contextLimit || Number(option.value) > contextLimit;
-  });
-  const validOptions = options.filter((option) => !option.disabled);
-  contextWindow.disabled = validOptions.length === 0;
-  const previousOption = options.find((option) => Number(option.value) === previousSelection);
-  if (previousOption && !previousOption.disabled) {
-    contextWindow.value = previousOption.value;
-  } else if (validOptions.length) {
-    contextWindow.value = validOptions[validOptions.length - 1].value;
-  }
-
-  const selectedName = modelAccessMode === 'hosted' ? hostedModel.value.trim() : modelSelect.value;
-  if (!selectedName) {
-    contextWindowStatus.textContent = 'Select a model to check its supported context size.';
-  } else if (!contextLimit) {
-    contextWindowStatus.textContent = modelAccessMode === 'hosted'
-      ? 'The hosted model limit is unknown. Check the server or enter its maximum context before reviewing.'
-      : `Ollama did not report a context limit for ${selectedName}; explicit context choices are disabled.`;
-  } else if (!validOptions.length) {
-    contextWindowStatus.textContent = `${selectedName} reports a ${contextLimit.toLocaleString()}-token maximum, below the available review settings.`;
-  } else {
-    contextWindowStatus.textContent = `${selectedName} supports up to ${contextLimit.toLocaleString()} tokens. Oversized context choices are disabled.`;
-  }
-}
-
-function validateContextSelection() {
-  const contextLimit = getActiveContextLimit();
-  if (!contextLimit) {
-    throw new Error('The selected model context limit is unknown. Refresh local models, or check/configure the hosted server first.');
-  }
-  const selectedContext = Number(contextWindow.value);
-  if (!selectedContext || selectedContext > contextLimit) {
-    throw new Error(`Choose a context window no larger than ${contextLimit.toLocaleString()} tokens for the selected model.`);
-  }
-  return { selectedContext, contextLimit };
-}
-
-function setModelAccessMode(mode) {
-  modelAccessMode = mode === 'hosted' ? 'hosted' : 'ollama';
-  const hosted = modelAccessMode === 'hosted';
-  ollamaAccessPanel.hidden = hosted;
-  hostedAccessPanel.hidden = !hosted;
-  ollamaModelSelection.hidden = hosted;
-  hostedModelSelection.hidden = !hosted;
-  providerModeLabel.textContent = hosted ? 'Mode: Hosted model server' : 'Mode: Local Ollama';
-  providerModeBtn.textContent = hosted ? 'Switch to local Ollama' : 'Switch to hosted server';
-  syncHostedModelSummary();
-  syncContextWindowOptions();
-}
-
-async function checkHostedServer() {
-  const provider = buildModelProviderPayload();
-  try {
-    validateHostedProvider(provider);
-    hostedHealthBtn.disabled = true;
-    hostedStatus.textContent = `Checking ${provider.base_url}...`;
-    const data = await fetchJson('/api/hosted/health', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: provider.model, model_provider: provider }),
-    });
-    if (data.error) throw new Error(data.error);
-    if (data.max_context_length) {
-      hostedContextLimit.value = String(data.max_context_length);
-      hostedDetectedModelName = provider.model;
-    }
-    syncContextWindowOptions();
-    const availability = data.model_available
-      ? `${provider.model} is available.`
-      : `${provider.model} was not listed by the server.`;
-    const listed = data.available_models?.length
-      ? `\nModels: ${data.available_models.join(', ')}`
-      : '\nThe server did not return a model catalogue; direct review requests may still work.';
-    const contextDetail = data.max_context_length
-      ? ` Maximum context: ${Number(data.max_context_length).toLocaleString()} tokens.`
-      : ' The server did not report a context maximum; enter the configured server limit manually.';
-    hostedStatus.textContent = `Hosted server ONLINE (${data.latency_seconds}s). ${availability}${contextDetail}${listed}`;
-  } catch (error) {
-    hostedStatus.textContent = `Hosted connection failed: ${error.message}`;
-  } finally {
-    hostedHealthBtn.disabled = false;
   }
 }
 
@@ -495,281 +325,71 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function renderModelMetadata(model) {
-  const metadata = [
-    ['Family', model.family],
-    ['Parameters', model.parameter_size],
-    ['Quantization', model.quantization_level],
-    ['Format', model.format ? String(model.format).toUpperCase() : ''],
-    ['Disk size', formatByteSize(model.size)],
-    ['Updated', formatModelDate(model.modified_at)],
-    ['Maximum context', model.max_context_length ? Number(model.max_context_length).toLocaleString() + ' tokens' : 'Not reported'],
-    ['Loaded context', model.context_length ? Number(model.context_length).toLocaleString() + ' tokens' : ''],
-    ['Memory', formatByteSize(model.size_vram)],
-    ['Loaded until', formatModelDateTime(model.expires_at)],
-  ].filter(([, value]) => value !== null && value !== undefined && value !== '');
-
-  if (metadata.length === 0) {
-    return '<span class="model-meta-empty">No additional model metadata reported.</span>';
-  }
-  return metadata.map(([label, value]) => `
-    <span class="model-meta-item"><b>${escapeHtml(label)}</b>${escapeHtml(value)}</span>
-  `).join('');
-}
-
-async function refreshModels(options = {}) {
-  const { pollForModel = null, expectedStatus = null, maxAttempts = 1, delayMs = 1200 } = options;
-  const selectedModelName = modelSelect.value || preferredModelName;
-  modelsPane.textContent = 'Loading…';
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    try {
-      const data = await fetchJson('/api/models');
-      const models = data?.models || [];
-      currentModels = models;
-      modelSelect.innerHTML = '';
-      if (models.length === 0) {
-        modelsPane.innerHTML = '<div class="small">No local models detected. Pull one with: ollama pull llama3.2</div>';
-        return;
-      }
-      models.forEach((model) => {
-        const option = document.createElement('option');
-        option.value = model.name;
-        option.textContent = model.name;
-        modelSelect.appendChild(option);
-      });
-      modelsPane.innerHTML = models.map((model) => `
-        <div class="model-row">
-          <div class="model-summary">
-            <span class="pill ${model.status === 'online' ? '' : 'offline'}">${escapeHtml(model.name)} · ${escapeHtml(model.status)}</span>
-            <div class="model-meta">${renderModelMetadata(model)}</div>
-          </div>
-          <div class="row model-actions">
-            <button class="secondary model-action" data-model="${escapeHtml(model.name)}" data-action="start">Start</button>
-            <button class="secondary model-action model-action-ready" data-model="${escapeHtml(model.name)}" data-action="ready">Check ready</button>
-            <button class="secondary model-action model-action-test" data-model="${escapeHtml(model.name)}" data-action="benchmark">Test</button>
-            <button class="secondary model-action" data-model="${escapeHtml(model.name)}" data-action="stop">Stop</button>
-          </div>
-        </div>
-      `).join('');
-      modelsPane.querySelectorAll('button[data-model]').forEach((button) => {
-        button.addEventListener('click', () => {
-          const buttonModel = button.getAttribute('data-model');
-          if (Array.from(modelSelect.options).some((option) => option.value === buttonModel)) {
-            modelSelect.value = buttonModel;
-            preferredModelName = buttonModel;
-            syncContextWindowOptions();
-          }
-          const action = button.getAttribute('data-action') || 'start';
-          if (action === 'stop') {
-            stopModel(buttonModel);
-          } else if (action === 'benchmark') {
-            runModelBenchmark(buttonModel, button);
-          } else if (action === 'ready') {
-            checkModelReady(buttonModel);
-          } else {
-            startModel(buttonModel);
-          }
-        });
-      });
-
-      const preferredModel = models.find((model) => model.name === selectedModelName) || models.find((model) => model.status === 'online') || models[0];
-      if (preferredModel) {
-        modelSelect.value = preferredModel.name;
-        preferredModelName = preferredModel.name;
-      }
-      syncContextWindowOptions();
-
-      if (pollForModel) {
-        const targetModel = models.find((model) => model.name === pollForModel);
-        const targetStatus = targetModel?.status || null;
-        if (expectedStatus && targetStatus === expectedStatus) {
-          return;
-        }
-        if (!expectedStatus && targetStatus && targetStatus !== 'pending') {
-          return;
-        }
-      } else {
-        return;
-      }
-    } catch (error) {
-      modelsPane.textContent = error.message;
-      return;
-    }
-
-    if (attempt < maxAttempts - 1) {
-      await sleep(delayMs);
-    }
-  }
-}
-
 async function checkHealth() {
+  healthStatus.textContent = 'Checking inference service...';
   try {
     const data = await fetchJson('/api/health');
-    const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
-    const missingCapabilities = REQUIRED_SERVER_CAPABILITIES.filter((capability) => !capabilities.includes(capability));
-    healthStatus.textContent = `Ollama endpoint: ${data.ollama_base_url}\nStatus: ${data.status.toUpperCase()}\nModel count: ${data.model_count ?? 'n/a'}\nReviewer API: ${data.api_version || 'outdated'}`;
+    const missingCapabilities = REQUIRED_SERVER_CAPABILITIES.filter((item) => !(data.capabilities || []).includes(item));
     if (missingCapabilities.length) {
-      healthStatus.textContent += `\nServer update required: restart ASCS Reviewer to enable ${missingCapabilities.join(', ')}.`;
+      healthStatus.textContent = 'Server update required: restart ASCS Reviewer, then reload this page.';
+      return;
     }
-    if (data.error) {
-      healthStatus.textContent += `\nError: ${data.error}`;
+    if (data.status !== 'online') {
+      healthStatus.textContent = `Inference service ${String(data.status || 'offline').toUpperCase()}: ${data.error || 'The configured endpoint is unavailable.'}`;
+      return;
     }
+    healthStatus.textContent = `Inference service ONLINE at ${data.endpoint}. Context limit: ${Number(data.context_limit || 0).toLocaleString()} tokens.`;
   } catch (error) {
-    healthStatus.textContent = `Connection error: ${error.message}`;
+    healthStatus.textContent = featureErrorMessage(error, 'Inference service check');
   }
 }
 
-async function startModel(modelName) {
-  if (!modelName) {
-    return;
-  }
+function showInferenceSettings(settings) {
+  inferenceEndpoint.value = settings.endpoint || '';
+  inferenceDeploymentId.value = settings.deployment_id || '';
+  inferenceContextLimit.value = settings.context_limit || '';
+  inferenceRequestTimeout.value = settings.request_timeout || '';
+  inferenceReviewTimeout.value = settings.review_timeout || '';
+  inferenceApiKey.value = '';
+  clearInferenceApiKey.checked = false;
+  inferenceKeyStatus.textContent = settings.api_key_configured
+    ? 'An API key is configured. Leave the field blank to keep it, or select the removal option.'
+    : 'No API key is configured. A key entered here is held only in server memory.';
+}
+
+async function loadInferenceSettings() {
   try {
-    const contextConfiguration = validateContextSelection();
-    healthStatus.textContent = `Loading ${modelName} and checking readiness...`;
-    const data = await fetchJson('/api/models/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName, context_window: contextConfiguration.selectedContext, model_context_limit: contextConfiguration.contextLimit }) });
-    if (data.error) {
-      healthStatus.textContent = `Start failed: ${data.error}`;
-      return;
-    }
-    if (!data.ok) {
-      healthStatus.textContent = `Start failed: ${data.error || data.note || 'The model did not become ready.'}`;
-      await refreshModels();
-      return;
-    }
-    healthStatus.textContent = `Starting ${modelName}…`;
-    await refreshModels({ pollForModel: modelName, expectedStatus: 'online', maxAttempts: 8, delayMs: 1200 });
-    const refreshedModel = currentModels.find((model) => model.name === modelName);
-    if (refreshedModel?.status === 'online') {
-      const contextLabel = data.context_window ? ` at ${(data.context_window / 1024).toFixed(0)}K context` : '';
-      healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s${contextLabel}.` : `Started ${modelName}${contextLabel}`;
-    } else {
-      healthStatus.textContent = `Start requested for ${modelName}. The model may still be loading.`;
-    }
+    showInferenceSettings(await fetchJson('/api/inference/settings'));
   } catch (error) {
-    healthStatus.textContent = `Start failed: ${error.message}`;
+    healthStatus.textContent = featureErrorMessage(error, 'Inference settings');
   }
 }
 
-async function checkModelReady(modelName) {
-  if (!modelName) {
-    return;
-  }
+async function saveInferenceSettings(event) {
+  event.preventDefault();
+  if (!inferenceSettingsForm.reportValidity()) return;
+  saveInferenceSettingsBtn.disabled = true;
+  healthStatus.textContent = 'Applying inference settings...';
   try {
-    const contextConfiguration = validateContextSelection();
-    healthStatus.textContent = `Checking whether ${modelName} can respond...`;
-    const data = await fetchJson('/api/models/ready', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName, context_window: contextConfiguration.selectedContext, model_context_limit: contextConfiguration.contextLimit }) });
-    await refreshModels();
-    if (data.error) {
-      if (String(data.error).toLowerCase() === 'not found') {
-        healthStatus.textContent = 'Ready check endpoint is unavailable. Restart the ASCS Reviewer server.';
-        return;
-      }
-      healthStatus.textContent = `Ready check failed: ${data.error}`;
-      return;
-    }
-    if (data.ready || data.status === 'ready') {
-      const contextLabel = data.context_window ? ` at ${(data.context_window / 1024).toFixed(0)}K context` : '';
-      healthStatus.textContent = data.latency_seconds ? `Ready: ${modelName} responded in ${data.latency_seconds}s${contextLabel}.` : `Ready: ${modelName} responded${contextLabel}.`;
-      return;
-    }
-    healthStatus.textContent = `Not ready: ${data.error || data.reason || 'The model did not answer the readiness probe.'}`;
-  } catch (error) {
-    healthStatus.textContent = `Ready check failed: ${error.message}`;
-  }
-}
-
-async function stopModel(modelName) {
-  if (!modelName) {
-    return;
-  }
-  try {
-    const data = await fetchJson('/api/models/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: modelName }) });
-    if (data.error) {
-      healthStatus.textContent = `Stop failed: ${data.error}`;
-      return;
-    }
-    if (data.status === 'not-running') {
-      healthStatus.textContent = `${modelName} is already not running.`;
-      await refreshModels();
-      return;
-    }
-    healthStatus.textContent = `Stopping ${modelName}…`;
-    await refreshModels({ pollForModel: modelName, expectedStatus: 'offline', maxAttempts: 8, delayMs: 1200 });
-    const refreshedModel = currentModels.find((model) => model.name === modelName);
-    if (refreshedModel?.status === 'offline') {
-      healthStatus.textContent = `Stopped ${modelName}`;
-    } else {
-      healthStatus.textContent = `Stop requested for ${modelName}. The model list will refresh again shortly.`;
-    }
-  } catch (error) {
-    healthStatus.textContent = `Stop failed: ${error.message}`;
-  }
-}
-
-function renderBenchmarkResults() {
-  if (!benchmarkResults.size) {
-    benchmarkResultsBody.innerHTML = '<tr><td colspan="6" class="muted">Run Test on an installed model to add a result.</td></tr>';
-    return;
-  }
-  benchmarkResultsBody.innerHTML = Array.from(benchmarkResults.values())
-    .sort((left, right) => right.score - left.score)
-    .map((result) => `
-      <tr>
-        <td>${escapeHtml(result.model)}</td>
-        <td><b>${escapeHtml(result.score.toFixed(1))}/100</b></td>
-        <td>${escapeHtml(result.metrics.precision_percent)}%</td>
-        <td>${escapeHtml(result.metrics.recall_percent)}%</td>
-        <td>${escapeHtml(result.metrics.control_accuracy_percent)}%</td>
-        <td>${escapeHtml(result.review_seconds)}s</td>
-      </tr>
-    `).join('');
-}
-
-async function runModelBenchmark(modelName, button, providerConfig = null) {
-  if (!modelName) return;
-  const localModel = currentModels.find((model) => model.name === modelName);
-  const provider = providerConfig || { mode: 'ollama', model: modelName, context_limit: Number(localModel?.max_context_length) || null };
-  const previousLabel = button?.textContent || 'Test';
-  if (button) {
-    button.disabled = true;
-    button.textContent = 'Testing...';
-  }
-  benchmarkStatus.textContent = `Preparing ${modelName} and running benchmark v1.0...`;
-  try {
-    const contextConfiguration = validateContextSelection();
-    const data = await fetchJson('/api/models/benchmark', {
+    const settings = await fetchJson('/api/inference/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelName, model_provider: provider, context_window: contextConfiguration.selectedContext }),
+      body: JSON.stringify({
+        endpoint: inferenceEndpoint.value.trim(),
+        deployment_id: inferenceDeploymentId.value.trim(),
+        context_limit: Number(inferenceContextLimit.value),
+        request_timeout: Number(inferenceRequestTimeout.value),
+        review_timeout: Number(inferenceReviewTimeout.value),
+        api_key: inferenceApiKey.value,
+        clear_api_key: clearInferenceApiKey.checked,
+      }),
     });
-    if (data.error) throw new Error(data.error);
-    const resultKey = `${data.provider_mode || provider.mode}:${provider.base_url || ''}:${modelName}`;
-    benchmarkResults.set(resultKey, data);
-    renderBenchmarkResults();
-    const missed = data.metrics?.missed_findings || [];
-    const unexpected = data.metrics?.unexpected_findings || [];
-    const detail = [
-      missed.length ? `Missed: ${missed.map((item) => `${item.requirement_id}/${item.rule_id}`).join(', ')}.` : 'All seeded defects found.',
-      unexpected.length ? `Unexpected: ${unexpected.map((item) => `${item.requirement_id}/${item.rule_id}`).join(', ')}.` : 'No unexpected findings.',
-      data.parse_error ? data.parse_error : '',
-    ].filter(Boolean).join(' ');
-    const contextLabel = data.context_window ? ` with a ${(data.context_window / 1024).toFixed(0)}K context window` : '';
-    benchmarkStatus.textContent = `${modelName} scored ${data.score.toFixed(1)}/100${contextLabel} in ${data.review_seconds}s after ${data.warmup_seconds}s warm-up. ${detail}`;
-    if ((data.provider_mode || provider.mode) === 'ollama') {
-      await refreshModels();
-    }
+    showInferenceSettings(settings);
+    await checkHealth();
   } catch (error) {
-    benchmarkStatus.textContent = `${featureErrorMessage(error, 'Model benchmark')} Model: ${modelName}.`;
+    healthStatus.textContent = featureErrorMessage(error, 'Applying inference settings');
   } finally {
-    if (button?.isConnected) {
-      button.disabled = false;
-      button.textContent = previousLabel;
-    }
+    saveInferenceSettingsBtn.disabled = false;
   }
 }
 
@@ -780,10 +400,7 @@ function renderRagStatus(data) {
     ragStatus.textContent = 'No retrieval knowledge is loaded.';
     return;
   }
-  const vectorDetail = data.vector_chunk_count
-    ? ` ${data.vector_chunk_count} chunk(s) have ${data.dimensions || 'unknown'}-dimension vectors${data.embedding_model ? ` from ${data.embedding_model}` : ''}.`
-    : '';
-  ragStatus.textContent = `${data.name || 'Reference index'}: ${data.chunk_count || 0} chunk(s), ~${Number(data.token_count || 0).toLocaleString()} tokens across ${data.source_count || 0} source(s). Retrieval: ${data.retrieval_mode}.${vectorDetail}`;
+  ragStatus.textContent = `${data.name || 'Reference index'}: ${data.chunk_count || 0} chunk(s), ~${Number(data.token_count || 0).toLocaleString()} tokens across ${data.source_count || 0} source(s). Retrieval: ${data.retrieval_mode}.`;
 }
 
 function syncRagReferenceEntries(data) {
@@ -825,7 +442,7 @@ async function refreshRagStatus() {
 async function handleRagStoreSelection(event) {
   const file = event.target.files?.[0];
   if (!file) return;
-  ragStatus.textContent = `Loading vector store ${file.name}...`;
+  ragStatus.textContent = `Loading reference store ${file.name}...`;
   try {
     const store = JSON.parse(await file.text());
     const data = await fetchJson('/api/rag/load', {
@@ -836,7 +453,7 @@ async function handleRagStoreSelection(event) {
     if (data.error) throw new Error(data.error);
     renderRagStatus(data);
   } catch (error) {
-    ragStatus.textContent = featureErrorMessage(error, 'Vector store load');
+    ragStatus.textContent = featureErrorMessage(error, 'Reference store load');
   } finally {
     event.target.value = '';
   }
@@ -871,7 +488,7 @@ async function handleFileSelection(event) {
       document.document_id = createRagDocumentId();
     });
     documentStatus.textContent = `Chunking and indexing ${addedEntries.length} reference document(s)...`;
-    ragStatus.textContent = `Vectorising ${addedEntries.length} reference document(s)...`;
+    ragStatus.textContent = `Indexing ${addedEntries.length} reference document(s)...`;
     const data = await fetchJson('/api/rag/load', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -953,11 +570,7 @@ function removeSelectedReviewDocument() {
 }
 
 function buildReviewPayload() {
-  const modelProvider = buildModelProviderPayload();
   const payload = {
-    model: modelProvider.model,
-    model_provider: modelProvider,
-    context_window: Number(contextWindow.value),
     prompt_mode: promptMode,
     document_text: document.getElementById('documentText').value,
     rag: {
@@ -979,16 +592,10 @@ function buildReviewPayload() {
 }
 
 async function runReview() {
-  reviewStatus.textContent = modelAccessMode === 'hosted'
-    ? 'Sending the review to the hosted model server...'
-    : 'Reviewing with high effort. Large local models can take several minutes...';
+  reviewStatus.textContent = 'Sending the review to the configured inference service...';
   reviewOutput.textContent = 'Generating complete-document review...';
   try {
-    validateContextSelection();
     const payload = buildReviewPayload();
-    if (payload.model_provider.mode === 'hosted') {
-      validateHostedProvider(payload.model_provider);
-    }
     const data = await fetchJson('/api/reviewer/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     if (data.error) {
       reviewStatus.textContent = `Review failed: ${data.error}`;
@@ -1007,13 +614,9 @@ async function runReview() {
     const atomicRepairMethod = data.atomic_comment_repair?.source
       ? `; recovered ${data.atomic_comment_repair.comment_count || 0} atomic comment(s) using ${data.atomic_comment_repair.source}`
       : '';
-    const providerMethod = data.provider_mode === 'hosted' ? 'hosted model' : 'local Ollama';
     const contextLabel = data.context_window ? ` using ${(data.context_window / 1024).toFixed(0)}K context` : '';
-    reviewStatus.textContent = `Review completed with ${data.model} via ${providerMethod}${contextLabel}${reviewMethod} across ${data.source_count || 0} source document(s)${retrievalMethod}${relevanceMethod}${atomicRepairMethod}`;
+    reviewStatus.textContent = `Review completed${contextLabel}${reviewMethod} across ${data.source_count || 0} source document(s)${retrievalMethod}${relevanceMethod}${atomicRepairMethod}`;
     renderReviewOutput(reviewResult);
-    if (data.provider_mode !== 'hosted') {
-      refreshModels();
-    }
   } catch (error) {
     reviewStatus.textContent = error.message;
     reviewOutput.textContent = error.message;
@@ -1342,9 +945,7 @@ function hasReviewResult(reviewResult) {
 
 function buildExportFileName() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const selectedModel = modelAccessMode === 'hosted' ? hostedModel.value : modelSelect.value;
-  const modelName = (selectedModel || 'model').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'model';
-  return `review-output-${modelName}-${timestamp}.txt`;
+  return `review-output-${timestamp}.txt`;
 }
 
 function renderReviewOutput(reviewResult) {
@@ -1442,44 +1043,8 @@ function exportTraceabilityAnalysis() {
   reviewStatus.textContent = `Traceability analysis exported to ${defaultName}`;
 }
 
-document.getElementById('refreshBtn').addEventListener('click', refreshModels);
 document.getElementById('healthBtn').addEventListener('click', checkHealth);
-providerModeBtn.addEventListener('click', () => {
-  setModelAccessMode(modelAccessMode === 'ollama' ? 'hosted' : 'ollama');
-});
-hostedHealthBtn.addEventListener('click', checkHostedServer);
-hostedBenchmarkBtn.addEventListener('click', () => {
-  const provider = buildModelProviderPayload();
-  try {
-    validateHostedProvider(provider);
-    runModelBenchmark(provider.model, hostedBenchmarkBtn, provider);
-  } catch (error) {
-    benchmarkStatus.textContent = error.message;
-  }
-});
-hostedBaseUrl.addEventListener('input', () => {
-  syncHostedModelSummary();
-  if (hostedDetectedModelName) {
-    hostedContextLimit.value = '';
-    hostedDetectedModelName = '';
-  }
-  syncContextWindowOptions();
-});
-hostedModel.addEventListener('input', () => {
-  syncHostedModelSummary();
-  if (hostedDetectedModelName && hostedModel.value.trim() !== hostedDetectedModelName) {
-    hostedContextLimit.value = '';
-    hostedDetectedModelName = '';
-  }
-  syncContextWindowOptions();
-});
-hostedContextLimit.addEventListener('input', () => {
-  hostedDetectedModelName = '';
-  syncContextWindowOptions();
-});
-contextWindow.addEventListener('change', () => {
-  preferredContextWindow = Number(contextWindow.value) || preferredContextWindow;
-});
+inferenceSettingsForm.addEventListener('submit', saveInferenceSettings);
 document.getElementById('reviewBtn').addEventListener('click', runReview);
 document.getElementById('traceabilityBtn').addEventListener('click', runTraceabilityAnalysis);
 document.getElementById('downloadReviewTextBtn').addEventListener('click', () => exportReview());
@@ -1501,10 +1066,6 @@ skillSelect.addEventListener('change', () => {
 });
 skillModeRadio.addEventListener('change', () => setPromptMode('skill'));
 customModeRadio.addEventListener('change', () => setPromptMode('custom'));
-modelSelect.addEventListener('change', () => {
-  preferredModelName = modelSelect.value;
-  syncContextWindowOptions();
-});
 fileInput.addEventListener('change', handleFileSelection);
 reviewFileInput.addEventListener('change', handleReviewDocumentSelection);
 ragStoreInput.addEventListener('change', handleRagStoreSelection);
@@ -1512,10 +1073,8 @@ referenceList.addEventListener('change', renderChunkTokenDetails);
 
 const savedConfig = readConfig();
 applyConfig(savedConfig);
-setModelAccessMode(modelAccessMode);
 setReviewInputMode(reviewInputMode);
 setPromptMode(promptMode);
-checkHealth();
-refreshModels();
+loadInferenceSettings().then(checkHealth);
 loadSkills();
 refreshRagStatus();

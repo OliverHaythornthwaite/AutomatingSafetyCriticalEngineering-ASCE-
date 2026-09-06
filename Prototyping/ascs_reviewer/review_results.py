@@ -3,9 +3,6 @@
 import json
 import re
 
-from app_config import MODEL_KEEP_ALIVE, OLLAMA_REVIEW_TIMEOUT_SECONDS
-
-
 class ReviewResultMixin:
     """Normalize model output into stable review sections and atomic comments."""
 
@@ -156,17 +153,14 @@ class ReviewResultMixin:
             f"Previous review response:\n{review_text}"
         )
         payload = {
-            "model": model,
             "messages": [
                 {"role": "system", "content": "Convert review findings into complete atomic engineering comments."},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
-            "format": "json",
             "options": self._build_review_model_options(len(prompt), context_window),
-            "keep_alive": MODEL_KEEP_ALIVE,
         }
-        response = self._request_model_chat(provider, payload, timeout=OLLAMA_REVIEW_TIMEOUT_SECONDS)
+        response = self._request_model_chat(provider, payload, timeout=provider["review_timeout"])
         repair_text, error = self._extract_review_text(response)
         if error:
             return []
@@ -304,7 +298,7 @@ class ReviewResultMixin:
 
     def _extract_review_text(self, response):
         if not isinstance(response, dict):
-            return "", "Ollama returned an unexpected review response."
+            return "", "The inference endpoint returned an unexpected review response."
 
         message = response.get("message") or {}
         content = message.get("content") or ""
@@ -316,11 +310,11 @@ class ReviewResultMixin:
             done_reason = response.get("done_reason") or "unknown"
             return (
                 "",
-                "The selected model responded only with internal reasoning and did not produce the final JSON review. "
-                f"Ollama ended with reason '{done_reason}'. Increase OLLAMA_REVIEW_NUM_PREDICT, use a faster/non-reasoning model, or reduce the complete review batch size.",
+                "The inference endpoint responded only with internal reasoning and did not produce the final JSON review. "
+                f"Generation ended with reason '{done_reason}'. Increase ASCS_REVIEW_MAX_OUTPUT_TOKENS or reduce the review input.",
             )
 
-        return "", "The selected model returned an empty review response."
+        return "", "The inference endpoint returned an empty review response."
 
     def _ensure_atomic_comments_cover_section_issues(self, sections, atomic_comments):
         comments = list(atomic_comments)
@@ -474,4 +468,3 @@ class ReviewResultMixin:
         if not text:
             return "Not found in provided reference material"
         return text
-

@@ -56,14 +56,14 @@
       </details>
 
       <details class="panel collapsible-panel" open>
-        <summary class="panel-summary"><h2>2. Reference documents and vector index</h2></summary>
+        <summary class="panel-summary"><h2>2. Reference documents and local index</h2></summary>
         <p class="section-intro">Every reference document added here is automatically chunked and indexed.</p>
         <div class="rag-layout">
           <div class="rag-source-panel">
             <h3>Indexed reference documents</h3>
             <div class="row rag-actions">
               <button id="addReferenceBtn" type="button">Add reference files</button>
-              <button id="loadRagStoreBtn" class="secondary" type="button">Import vector store</button>
+              <button id="loadRagStoreBtn" class="secondary" type="button">Import reference store</button>
               <button id="removeReferenceBtn" class="secondary" type="button">Remove selected</button>
               <button id="clearRagBtn" class="secondary" type="button">Clear all</button>
             </div>
@@ -72,7 +72,7 @@
             <select id="referenceList" class="reference-list" size="5" aria-label="Indexed reference documents"></select>
             <div id="documentStatus" class="muted">No reference documents have been added yet.</div>
             <div id="chunkTokenDetails" class="chunk-token-details muted">Select an indexed reference to see its per-chunk token counts.</div>
-            <p class="field-help">Token counts are model-neutral estimates because exact tokenisation varies by model. Portable JSON stores may supply content, source metadata, and optional embedding vectors.</p>
+            <p class="field-help">Token counts are portable estimates. Reference stores contain text chunks and source metadata.</p>
           </div>
           <div class="rag-settings-panel">
             <h3>Retrieval settings</h3>
@@ -90,85 +90,42 @@
       </details>
 
       <details class="panel collapsible-panel" open>
-        <summary class="panel-summary"><h2>3. Model access</h2></summary>
-        <div class="provider-mode-bar">
-          <div>
-            <strong id="providerModeLabel">Mode: Local Ollama</strong>
-            <p class="section-intro">Choose whether reviews run on this computer or an OpenAI-compatible model hosting server.</p>
-          </div>
-          <button id="providerModeBtn" class="secondary" type="button">Switch to hosted server</button>
-        </div>
-
-        <div class="context-window-control">
-          <label>Review context window
-            <select id="contextWindow">
-              <option value="8192">8K tokens</option>
-              <option value="16384">16K tokens</option>
-              <option value="32768" selected>32K tokens — recommended</option>
-              <option value="65536">64K tokens</option>
-              <option value="131072">128K tokens</option>
-            </select>
-          </label>
-          <p class="field-help">Larger windows allow more target and retrieved evidence, but use more memory. Ollama receives this as <code>num_ctx</code>; hosted models must also support the selected window on their server.</p>
-          <p id="contextWindowStatus" class="field-help context-window-status">Select a model to check its supported context size.</p>
-        </div>
-
-        <div id="ollamaAccessPanel">
-          <p class="section-intro">Connect to local Ollama models and confirm the selected engine is ready before running a review.</p>
-          <div class="row">
-            <button id="refreshBtn">Refresh models</button>
-            <button id="healthBtn" class="secondary">Check health</button>
-          </div>
-          <div id="healthStatus" class="status status-ready">Ready to review.</div>
-          <h3>Installed models</h3>
-          <div id="models" class="model-list">Loading available models…</div>
-        </div>
-
-        <div id="hostedAccessPanel" hidden>
-          <p class="section-intro">Connect to an OpenAI-compatible API such as vLLM, LM Studio, llama.cpp, or another managed model endpoint.</p>
-          <div class="hosted-model-grid">
-            <label>Server base URL
-              <input id="hostedBaseUrl" type="url" value="http://127.0.0.1:8001/v1" placeholder="https://models.example.com/v1" />
+        <summary class="panel-summary"><h2>3. Inference service</h2></summary>
+        <p class="section-intro">Configure the OpenAI-compatible service used by this server process. Environment variables provide the startup defaults.</p>
+        <form id="inferenceSettingsForm">
+          <div class="inference-settings-grid">
+            <label>Endpoint URL
+              <input id="inferenceEndpoint" type="url" required spellcheck="false" placeholder="http://127.0.0.1:8001/v1" />
             </label>
-            <label>Model identifier
-              <input id="hostedModel" type="text" placeholder="organisation/review-model" />
+            <label>Deployment identifier
+              <input id="inferenceDeploymentId" type="text" required spellcheck="false" maxlength="256" />
             </label>
-            <label>API key (optional)
-              <input id="hostedApiKey" type="password" autocomplete="off" placeholder="Kept only for this browser session" />
+            <label>Context capacity (tokens)
+              <input id="inferenceContextLimit" type="number" required min="8192" max="131072" step="1" />
             </label>
-            <label>Maximum context tokens
-              <input id="hostedContextLimit" type="number" min="8192" step="1024" placeholder="Detected automatically or enter manually" />
+            <label>Health timeout (seconds)
+              <input id="inferenceRequestTimeout" type="number" required min="0.1" max="300" step="0.1" />
+            </label>
+            <label>Review timeout (seconds)
+              <input id="inferenceReviewTimeout" type="number" required min="1" max="7200" step="1" />
+            </label>
+            <label>API key
+              <input id="inferenceApiKey" type="password" autocomplete="new-password" maxlength="8192" placeholder="Leave blank to keep the current key" />
             </label>
           </div>
-          <p class="field-help">The key is sent only to the local reviewer service for the current request and is never saved in browser storage. Use HTTPS for remote servers.</p>
-          <div class="row hosted-actions">
-            <button id="hostedHealthBtn" type="button">Check hosted server</button>
-            <button id="hostedBenchmarkBtn" class="secondary" type="button">Test hosted model</button>
+          <label class="inference-clear-key"><input id="clearInferenceApiKey" type="checkbox" /> Remove the currently configured API key</label>
+          <p id="inferenceKeyStatus" class="field-help">The API key is held only in server memory and is never returned to the browser.</p>
+          <div class="row inference-actions">
+            <button id="saveInferenceSettingsBtn" type="submit">Apply settings</button>
+            <button id="healthBtn" class="secondary" type="button">Check service</button>
           </div>
-          <div id="hostedStatus" class="status status-ready">Enter a server URL and model identifier, then check the connection.</div>
-        </div>
-
-        <h3>Repeatable model benchmark</h3>
-        <p class="section-intro">Run Test for the selected provider to use benchmark v1.0: four seeded requirement defects and two clean controls with deterministic generation settings.</p>
-        <div id="benchmarkStatus" class="status status-ready">No model has been benchmarked in this session.</div>
-        <div class="benchmark-table-wrap">
-          <table class="benchmark-table">
-            <thead><tr><th>Model</th><th>Score</th><th>Precision</th><th>Recall</th><th>Clean controls</th><th>Review time</th></tr></thead>
-            <tbody id="benchmarkResults"><tr><td colspan="6" class="muted">Run Test on an installed model to add a result.</td></tr></tbody>
-          </table>
-        </div>
+        </form>
+        <div id="healthStatus" class="status status-ready">Checking inference service…</div>
       </details>
 
       <details class="panel collapsible-panel" open>
         <summary class="panel-summary"><h2>4. Review setup</h2></summary>
         <p class="section-intro">Choose a guided review skill or configure a custom review, then add the artefacts and supporting references.</p>
-        <label id="ollamaModelSelection">Local model
-          <select id="modelSelect"></select>
-        </label>
-        <label id="hostedModelSelection" hidden>Hosted model
-          <input id="hostedModelSummary" type="text" value="Configure the hosted model in Model access" readonly />
-        </label>
-
         <fieldset class="mode-switch">
           <legend>Review mode</legend>
           <label><input id="skillModeRadio" type="radio" name="promptMode" value="skill" checked /> Guided skill</label>

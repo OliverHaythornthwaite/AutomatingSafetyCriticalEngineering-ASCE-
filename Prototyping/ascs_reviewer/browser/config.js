@@ -1,4 +1,4 @@
-export const CONFIG_STORAGE_KEY = 'ascs-reviewer-config';
+export const CONFIG_STORAGE_KEY = 'ascs-reviewer-portable-config-v1';
 
 export function readConfig() {
   try {

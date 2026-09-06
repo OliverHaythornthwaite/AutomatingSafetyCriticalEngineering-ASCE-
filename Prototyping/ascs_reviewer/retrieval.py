@@ -7,18 +7,15 @@ from collections import Counter
 
 from app_config import (
     APPROX_CHARS_PER_TOKEN,
-    OLLAMA_READY_TIMEOUT_SECONDS,
-    OLLAMA_REVIEW_DEFAULT_NUM_CTX,
-    OLLAMA_REVIEW_MAX_NUM_CTX,
-    OLLAMA_REVIEW_MIN_NUM_CTX,
-    OLLAMA_REVIEW_NUM_PREDICT,
-    OLLAMA_REVIEW_REPEAT_PENALTY,
-    OLLAMA_REVIEW_TEMPERATURE,
-    OLLAMA_REVIEW_TOP_P,
+    MODEL_CONTEXT_LIMIT,
+    REVIEW_MAX_CONTEXT,
+    REVIEW_MAX_OUTPUT_TOKENS,
+    REVIEW_MIN_CONTEXT,
+    REVIEW_TEMPERATURE,
+    REVIEW_TOP_P,
     RAG_LOCK,
     RAG_MAX_CHUNKS,
     RAG_MAX_CONTENT_CHARS,
-    RAG_MAX_VECTOR_DIMENSIONS,
     RAG_STORE,
 )
 
@@ -44,7 +41,6 @@ class RetrievalMixin:
                     "id": str(chunk.get("id") or f"chunk-{document['chunk_count']}"),
                     "token_count": token_count,
                 })
-            vector_chunks = sum(1 for chunk in chunks if chunk.get("embedding"))
             return {
                 "loaded": bool(chunks),
                 "name": RAG_STORE["name"],
@@ -52,16 +48,13 @@ class RetrievalMixin:
                 "source_count": len(documents_by_id),
                 "documents": list(documents_by_id.values()),
                 "token_count": sum(document["token_count"] for document in documents_by_id.values()),
-                "vector_chunk_count": vector_chunks,
-                "dimensions": RAG_STORE["dimensions"],
-                "embedding_model": RAG_STORE["embedding_model"],
-                "retrieval_mode": "hybrid dense vector + TF-IDF" if vector_chunks else "local TF-IDF vector",
+                "retrieval_mode": "local TF-IDF",
             }
 
     def _clear_rag_content(self):
         global RAG_STORE
         with RAG_LOCK:
-            RAG_STORE = {"name": "", "embedding_model": "", "dimensions": 0, "chunks": []}
+            RAG_STORE = {"name": "", "chunks": []}
         return {"ok": True, **self._get_rag_status()}
 
     def _remove_rag_documents(self, body):
@@ -87,11 +80,8 @@ class RetrievalMixin:
                 chunk for chunk in existing_chunks if chunk.get("document_id") not in document_ids
             ]
             removed_chunks = len(existing_chunks) - len(remaining_chunks)
-            remaining_has_vectors = any(chunk.get("embedding") for chunk in remaining_chunks)
             RAG_STORE = {
                 "name": RAG_STORE["name"] if remaining_chunks else "",
-                "embedding_model": RAG_STORE["embedding_model"] if remaining_has_vectors else "",
-                "dimensions": RAG_STORE["dimensions"] if remaining_has_vectors else 0,
                 "chunks": remaining_chunks,
             }
         status = self._get_rag_status()
@@ -108,7 +98,7 @@ class RetrievalMixin:
 
         append = bool(body.get("append"))
         if isinstance(body.get("store"), dict):
-            result = self._normalize_vector_store(body["store"], body.get("name") or "Loaded vector store")
+            result = self._normalize_reference_store(body["store"], body.get("name") or "Loaded reference store")
         elif isinstance(body.get("documents"), list):
             documents, errors = self._extract_uploaded_documents(body["documents"], "knowledge")
             if not documents:
@@ -116,17 +106,13 @@ class RetrievalMixin:
                 return {"error": f"No readable knowledge documents were provided.{detail}"}
             result = self._build_rag_entries_from_documents(documents, body.get("name") or "Knowledge documents")
         else:
-            return {"error": "Provide either a portable vector store or knowledge documents."}
+            return {"error": "Provide either a portable reference store or knowledge documents."}
 
         if result.get("error"):
             return result
 
         global RAG_STORE
         with RAG_LOCK:
-            if append and RAG_STORE["dimensions"] and result["dimensions"] and RAG_STORE["dimensions"] != result["dimensions"]:
-                return {"error": "Cannot append vector stores with different embedding dimensions."}
-            if append and RAG_STORE["embedding_model"] and result["embedding_model"] and RAG_STORE["embedding_model"] != result["embedding_model"]:
-                return {"error": "Cannot append vector stores created by different embedding models."}
             existing_chunks = list(RAG_STORE["chunks"]) if append else []
             combined_chunks = existing_chunks + result["chunks"]
             if len(combined_chunks) > RAG_MAX_CHUNKS:
@@ -135,84 +121,47 @@ class RetrievalMixin:
                 return {"error": "The RAG store exceeds the 20,000,000-character safety limit."}
             RAG_STORE = {
                 "name": result["name"] if not append or not RAG_STORE["name"] else RAG_STORE["name"],
-                "embedding_model": result["embedding_model"] or (RAG_STORE["embedding_model"] if append else ""),
-                "dimensions": result["dimensions"] or (RAG_STORE["dimensions"] if append else 0),
                 "chunks": combined_chunks,
             }
         return {"ok": True, **self._get_rag_status()}
 
-    def _normalize_vector_store(self, store, default_name):
+    def _normalize_reference_store(self, store, default_name):
         raw_chunks = store.get("chunks")
         if not isinstance(raw_chunks, list) or not raw_chunks:
-            return {"error": "The vector store must contain a non-empty 'chunks' array."}
+            return {"error": "The reference store must contain a non-empty 'chunks' array."}
         if len(raw_chunks) > RAG_MAX_CHUNKS:
-            return {"error": f"The vector store exceeds the {RAG_MAX_CHUNKS:,}-chunk safety limit."}
-
-        embedding_model = str(store.get("embedding_model") or "").strip()
-        declared_dimensions = store.get("dimensions") or 0
-        try:
-            declared_dimensions = int(declared_dimensions)
-        except (TypeError, ValueError):
-            return {"error": "Vector-store dimensions must be an integer."}
-        if declared_dimensions < 0 or declared_dimensions > RAG_MAX_VECTOR_DIMENSIONS:
-            return {"error": f"Vector dimensions must be between 1 and {RAG_MAX_VECTOR_DIMENSIONS}."}
+            return {"error": f"The reference store exceeds the {RAG_MAX_CHUNKS:,}-chunk safety limit."}
 
         normalized = []
         source_document_ids = {}
-        detected_dimensions = 0
         total_characters = 0
         for index, chunk in enumerate(raw_chunks, start=1):
             if not isinstance(chunk, dict):
-                return {"error": f"Vector-store chunk {index} must be a JSON object."}
+                return {"error": f"Reference-store chunk {index} must be a JSON object."}
             content = str(chunk.get("content") or chunk.get("text") or "").strip()
             if not content:
                 continue
             total_characters += len(content)
             if total_characters > RAG_MAX_CONTENT_CHARS:
-                return {"error": "The vector store exceeds the 20,000,000-character safety limit."}
-
-            raw_embedding = chunk.get("embedding", chunk.get("vector"))
-            embedding = []
-            if raw_embedding is not None:
-                if not isinstance(raw_embedding, list) or not raw_embedding:
-                    return {"error": f"Vector-store chunk {index} has an invalid embedding."}
-                try:
-                    embedding = [float(value) for value in raw_embedding]
-                except (TypeError, ValueError):
-                    return {"error": f"Vector-store chunk {index} contains a non-numeric embedding value."}
-                if not all(math.isfinite(value) for value in embedding):
-                    return {"error": f"Vector-store chunk {index} contains a non-finite embedding value."}
-                if len(embedding) > RAG_MAX_VECTOR_DIMENSIONS:
-                    return {"error": f"Vector-store chunk {index} exceeds {RAG_MAX_VECTOR_DIMENSIONS} dimensions."}
-                detected_dimensions = detected_dimensions or len(embedding)
-                if len(embedding) != detected_dimensions:
-                    return {"error": "All vector-store embeddings must have the same dimensions."}
+                return {"error": "The reference store exceeds the 20,000,000-character safety limit."}
 
             metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
             source = str(chunk.get("source") or metadata.get("source") or metadata.get("document") or default_name).strip()
             chunk_id = str(chunk.get("id") or metadata.get("id") or f"chunk-{index}").strip()
             document_id = str(chunk.get("document_id") or metadata.get("document_id") or "").strip()
             if not document_id:
-                document_id = source_document_ids.setdefault(source, f"vector-{uuid.uuid4().hex}")
+                document_id = source_document_ids.setdefault(source, f"store-{uuid.uuid4().hex}")
             normalized.append({
                 "id": chunk_id,
                 "document_id": document_id,
                 "source": source,
                 "content": content,
-                "embedding": embedding,
             })
 
         if not normalized:
-            return {"error": "The vector store did not contain readable chunk content."}
-        if declared_dimensions and detected_dimensions and declared_dimensions != detected_dimensions:
-            return {"error": "Declared vector dimensions do not match the chunk embeddings."}
-        dimensions = detected_dimensions or declared_dimensions
-        if dimensions and not embedding_model:
-            embedding_model = str(store.get("model") or "").strip()
+            return {"error": "The reference store did not contain readable chunk content."}
         return {
             "name": str(store.get("name") or default_name).strip(),
-            "embedding_model": embedding_model,
-            "dimensions": dimensions,
             "chunks": normalized,
         }
 
@@ -228,9 +177,8 @@ class RetrievalMixin:
                     "document_id": document_id,
                     "source": source,
                     "content": content,
-                    "embedding": [],
                 })
-        return {"name": str(name), "embedding_model": "", "dimensions": 0, "chunks": entries}
+        return {"name": str(name), "chunks": entries}
 
     def _chunk_token_count(self, content):
         """Return a model-neutral token estimate for chunk visibility and budgeting."""
@@ -244,15 +192,15 @@ class RetrievalMixin:
     def _resolve_review_context_window(self, body, model_context_limit=None):
         raw_value = body.get("context_window") if isinstance(body, dict) else None
         if raw_value in (None, ""):
-            requested_context = max(OLLAMA_REVIEW_MIN_NUM_CTX, min(OLLAMA_REVIEW_MAX_NUM_CTX, OLLAMA_REVIEW_DEFAULT_NUM_CTX))
+            requested_context = max(REVIEW_MIN_CONTEXT, min(REVIEW_MAX_CONTEXT, MODEL_CONTEXT_LIMIT))
         else:
             try:
                 requested_context = int(raw_value)
             except (TypeError, ValueError) as exc:
                 raise ValueError("Context window must be a whole number of tokens.") from exc
-            if requested_context < OLLAMA_REVIEW_MIN_NUM_CTX or requested_context > OLLAMA_REVIEW_MAX_NUM_CTX:
+            if requested_context < REVIEW_MIN_CONTEXT or requested_context > REVIEW_MAX_CONTEXT:
                 raise ValueError(
-                    f"Context window must be between {OLLAMA_REVIEW_MIN_NUM_CTX:,} and {OLLAMA_REVIEW_MAX_NUM_CTX:,} tokens."
+                    f"Context window must be between {REVIEW_MIN_CONTEXT:,} and {REVIEW_MAX_CONTEXT:,} tokens."
                 )
         try:
             maximum_context = int(model_context_limit) if model_context_limit not in (None, "") else None
@@ -260,25 +208,23 @@ class RetrievalMixin:
             raise ValueError("Model context limit must be a whole number of tokens.") from exc
         if maximum_context and requested_context > maximum_context:
             raise ValueError(
-                f"The selected model supports at most {maximum_context:,} context tokens; choose a smaller context window."
+                f"The configured inference service supports at most {maximum_context:,} context tokens."
             )
         return requested_context
 
     def _build_review_model_options(self, prompt_length=0, context_window=None):
         requested_context = context_window or self._estimate_review_context_tokens(prompt_length)
         return {
-            "temperature": OLLAMA_REVIEW_TEMPERATURE,
-            "top_p": OLLAMA_REVIEW_TOP_P,
-            "repeat_penalty": OLLAMA_REVIEW_REPEAT_PENALTY,
-            "num_ctx": requested_context,
-            "num_predict": OLLAMA_REVIEW_NUM_PREDICT,
+            "temperature": REVIEW_TEMPERATURE,
+            "top_p": REVIEW_TOP_P,
+            "num_predict": REVIEW_MAX_OUTPUT_TOKENS,
         }
 
     def _estimate_review_context_tokens(self, prompt_length):
         prompt_tokens = max(1, int(prompt_length / APPROX_CHARS_PER_TOKEN))
-        needed_tokens = prompt_tokens + OLLAMA_REVIEW_NUM_PREDICT + 1024
+        needed_tokens = prompt_tokens + REVIEW_MAX_OUTPUT_TOKENS + 1024
         rounded_tokens = ((needed_tokens + 2047) // 2048) * 2048
-        return max(OLLAMA_REVIEW_MIN_NUM_CTX, min(OLLAMA_REVIEW_MAX_NUM_CTX, rounded_tokens))
+        return max(REVIEW_MIN_CONTEXT, min(REVIEW_MAX_CONTEXT, rounded_tokens))
 
     def _build_relevance_stepthrough(self, target_chunks, skills_prompt, review_goal, focus_limit=10):
         """Build a bounded, section-diverse retrieval query before composing the review prompt."""
@@ -411,11 +357,7 @@ class RetrievalMixin:
 
     def _retrieve_rag_chunks(self, query, limit=24, focus_queries=None):
         with RAG_LOCK:
-            store = {
-                "embedding_model": RAG_STORE["embedding_model"],
-                "dimensions": RAG_STORE["dimensions"],
-                "chunks": [dict(chunk) for chunk in RAG_STORE["chunks"]],
-            }
+            store = {"chunks": [dict(chunk) for chunk in RAG_STORE["chunks"]]}
         if not store["chunks"]:
             return []
 
@@ -424,49 +366,7 @@ class RetrievalMixin:
             for chunk in store["chunks"]
         ]
         scored = self._score_staged_retrieval_chunks(formatted, query, focus_queries or [])
-        score_by_index = {index: score for score, index, _ in scored}
-        has_dense_vectors = any(chunk.get("embedding") for chunk in store["chunks"])
-        query_embedding = self._request_rag_query_embedding(
-            query, store["embedding_model"], store["dimensions"]
-        ) if has_dense_vectors else []
-        if query_embedding:
-            for index, chunk in enumerate(store["chunks"]):
-                embedding = chunk.get("embedding") or []
-                if len(embedding) == len(query_embedding):
-                    score_by_index[index] = score_by_index.get(index, 0.0) + max(
-                        0.0, self._cosine_similarity(query_embedding, embedding)
-                    ) * 2.0
-
-        ranked_indices = sorted(range(len(formatted)), key=lambda index: (-score_by_index.get(index, 0.0), index))
-        return [formatted[index] for index in ranked_indices[:limit]]
-
-    def _request_rag_query_embedding(self, query, embedding_model, dimensions):
-        if not embedding_model or not dimensions:
-            return []
-        response = self._request_ollama(
-            "/api/embed",
-            {"model": embedding_model, "input": query[:24000]},
-            timeout=OLLAMA_READY_TIMEOUT_SECONDS,
-        )
-        if not isinstance(response, dict) or response.get("error"):
-            return []
-        embeddings = response.get("embeddings") or []
-        vector = embeddings[0] if embeddings and isinstance(embeddings[0], list) else []
-        if len(vector) != dimensions:
-            return []
-        try:
-            normalized = [float(value) for value in vector]
-            return normalized if all(math.isfinite(value) for value in normalized) else []
-        except (TypeError, ValueError):
-            return []
-
-    def _cosine_similarity(self, left, right):
-        dot_product = sum(a * b for a, b in zip(left, right))
-        left_norm = math.sqrt(sum(value * value for value in left))
-        right_norm = math.sqrt(sum(value * value for value in right))
-        if not left_norm or not right_norm:
-            return 0.0
-        return dot_product / (left_norm * right_norm)
+        return [chunk for _, _, chunk in scored[:limit]]
 
     def _interleave_chunks(self, primary, secondary):
         interleaved = []
@@ -478,8 +378,8 @@ class RetrievalMixin:
         return interleaved
 
     def _calculate_retrieval_budget(self, target_characters, instruction_characters, context_window=None):
-        effective_context_window = context_window or OLLAMA_REVIEW_DEFAULT_NUM_CTX
-        maximum_input_tokens = max(1024, effective_context_window - OLLAMA_REVIEW_NUM_PREDICT - 2048)
+        effective_context_window = context_window or MODEL_CONTEXT_LIMIT
+        maximum_input_tokens = max(1024, effective_context_window - REVIEW_MAX_OUTPUT_TOKENS - 2048)
         maximum_input_characters = maximum_input_tokens * APPROX_CHARS_PER_TOKEN
         prompt_overhead = instruction_characters + 14000
         return max(4000, maximum_input_characters - target_characters - prompt_overhead)
