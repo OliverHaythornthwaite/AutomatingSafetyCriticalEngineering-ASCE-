@@ -8,7 +8,7 @@
     "reviewer_role": "Act as an independent low-level verification and evidence reviewer.",
     "objective": "Assess whether the verification artefact demonstrates complete, repeatable, and traceable satisfaction of the allocated low-level requirements.",
     "instructions": [
-      "Execute every review section completely and with equal diligence; evidence state and environment only provide context and cannot remove checks.",
+      "Execute every review section completely and with equal diligence; verification type and environment only provide context and cannot remove checks.",
       "Separate planned verification from executed evidence and identify missing objective results.",
       "Check nominal, boundary, robustness, failure, state-transition, and timing coverage where applicable."
     ],
@@ -27,16 +27,16 @@
   "inputs": [
     {
       "id": "evidence-state",
-      "label": "Evidence state",
-      "help": "Sets whether the artefact is judged as a plan or completed evidence.",
+      "label": "Verification type",
+      "help": "Select the type of low-level requirement verification being reviewed.",
       "type": "select",
       "required": true,
-      "default": "executed",
-      "prompt_template": "Treat the artefact as {value}.",
+      "default": "formal-tests",
+      "prompt_template": "Focus the review on {value}.",
       "options": [
-        {"value": "planned", "label": "Planned", "prompt_value": "a planned verification specification"},
-        {"value": "partial", "label": "Partially executed", "prompt_value": "partially executed verification evidence"},
-        {"value": "executed", "label": "Executed", "prompt_value": "completed verification evidence"}
+        {"value": "informal-tests", "label": "Informal tests", "prompt_value": "informal low-level requirement tests"},
+        {"value": "formal-tests", "label": "Formal tests", "prompt_value": "formal low-level requirement tests"},
+        {"value": "coverage", "label": "Coverage", "prompt_value": "low-level requirement verification coverage"}
       ]
     },
     {

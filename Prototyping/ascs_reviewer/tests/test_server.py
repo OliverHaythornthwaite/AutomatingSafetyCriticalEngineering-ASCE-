@@ -1078,6 +1078,33 @@ class StaticServerTests(unittest.TestCase):
         self.assertEqual(200, response.status)
         self.assertIn("async function runReview()", content)
 
+    def test_browser_modules_are_served_from_an_explicit_allowlist(self):
+        for module in ("config", "documents", "providers", "rendering", "reviews"):
+            with self.subTest(module=module):
+                with urllib.request.urlopen(f"{self.base_url}/browser/{module}.js", timeout=2) as response:
+                    content = response.read().decode("utf-8")
+                self.assertEqual(200, response.status)
+                self.assertIn("export ", content)
+
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"{self.base_url}/browser/not-allowlisted.js", timeout=2)
+        self.assertEqual(404, caught.exception.code)
+        caught.exception.close()
+
+    def test_server_is_a_transport_and_capability_composition_layer(self):
+        source = (PROJECT_DIR / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn("class ASCSReviewerHandler(ReviewServiceMixin", source)
+        for implementation_method in (
+            "def _extract_document_bytes",
+            "def _request_model_chat",
+            "def _build_traceability_diagnostics",
+            "def _retrieve_rag_chunks",
+            "def _parse_review_result",
+            "def _build_reviewer_response",
+        ):
+            self.assertNotIn(implementation_method, source)
+
     def test_rag_status_endpoint_is_served(self):
         with urllib.request.urlopen(f"{self.base_url}/api/rag/status", timeout=2) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -1151,7 +1178,10 @@ class StaticServerTests(unittest.TestCase):
         self.assertEqual(set(), referenced_ids - element_ids)
 
     def test_javascript_explains_stale_server_endpoints(self):
-        javascript = (PROJECT_DIR / "app.js").read_text(encoding="utf-8")
+        javascript = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (PROJECT_DIR / "app.js", PROJECT_DIR / "browser" / "rendering.js")
+        )
 
         self.assertIn("because the running ASCS Reviewer server is outdated", javascript)
         self.assertIn("Server update required: restart ASCS Reviewer", javascript)

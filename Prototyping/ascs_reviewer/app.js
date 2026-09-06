@@ -1,3 +1,9 @@
+import { readConfig, writeConfig } from './browser/config.js';
+import { createRagDocumentId, getSelectedEntryIndex, readFileAsDocument } from './browser/documents.js';
+import { buildModelProvider, formatModelDate, formatModelDateTime, validateHostedProvider } from './browser/providers.js';
+import { escapeHtml, featureErrorMessage, formatByteSize, stripPageFromLocation } from './browser/rendering.js';
+import { normalizeReviewResultForDisplay, parseStructuredReviewJson } from './browser/reviews.js';
+
 const modelSelect = document.getElementById('modelSelect');
 const modelsPane = document.getElementById('models');
 const healthStatus = document.getElementById('healthStatus');
@@ -50,7 +56,6 @@ const hostedModelSummary = document.getElementById('hostedModelSummary');
 const contextWindow = document.getElementById('contextWindow');
 const contextWindowStatus = document.getElementById('contextWindowStatus');
 const hostedContextLimit = document.getElementById('hostedContextLimit');
-const CONFIG_STORAGE_KEY = 'ascs-reviewer-config';
 const reviewDocuments = [];
 const referenceEntries = [];
 let indexedReferenceDocuments = [];
@@ -66,18 +71,6 @@ let hostedDetectedModelName = '';
 let preferredContextWindow = 32768;
 const benchmarkResults = new Map();
 const REQUIRED_SERVER_CAPABILITIES = ['context-window-v1', 'model-context-discovery-v1', 'hosted-model-v1', 'model-benchmark-v1', 'rag-store-v1', 'rag-document-lifecycle-v1', 'indexed-reference-workflow-v1', 'staged-retrieval-v1', 'chunk-token-count-v1'];
-
-function readConfig() {
-  try {
-    const stored = localStorage.getItem(CONFIG_STORAGE_KEY);
-    if (stored) {
-      return JSON.parse(stored);
-    }
-  } catch (error) {
-    console.warn('Unable to read saved configuration', error);
-  }
-  return null;
-}
 
 function saveConfig() {
   captureCurrentSkillAnswers();
@@ -97,7 +90,7 @@ function saveConfig() {
     contextWindow: contextWindow.value,
     hostedContextLimit: hostedContextLimit.value,
   };
-  localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+  writeConfig(config);
   reviewStatus.textContent = 'Configuration saved.';
 }
 
@@ -155,16 +148,10 @@ function applyConfig(config) {
 
 function buildModelProviderPayload() {
   if (modelAccessMode === 'hosted') {
-    return {
-      mode: 'hosted',
-      base_url: hostedBaseUrl.value.trim(),
-      model: hostedModel.value.trim(),
-      api_key: hostedApiKey.value.trim(),
-      context_limit: Number(hostedContextLimit.value) || null,
-    };
+    return buildModelProvider({ mode: 'hosted', baseUrl: hostedBaseUrl.value, model: hostedModel.value, apiKey: hostedApiKey.value, contextLimit: hostedContextLimit.value });
   }
   const selectedModel = currentModels.find((model) => model.name === modelSelect.value);
-  return { mode: 'ollama', model: modelSelect.value, context_limit: Number(selectedModel?.max_context_length) || null };
+  return buildModelProvider({ mode: 'ollama', model: modelSelect.value, contextLimit: selectedModel?.max_context_length });
 }
 
 function syncHostedModelSummary() {
@@ -248,11 +235,6 @@ function setModelAccessMode(mode) {
   providerModeBtn.textContent = hosted ? 'Switch to local Ollama' : 'Switch to hosted server';
   syncHostedModelSummary();
   syncContextWindowOptions();
-}
-
-function validateHostedProvider(provider) {
-  if (!provider.base_url) throw new Error('Enter the hosted model server URL.');
-  if (!provider.model) throw new Error('Enter the hosted model identifier.');
 }
 
 async function checkHostedServer() {
@@ -504,22 +486,6 @@ function renderReviewDocuments() {
   });
 }
 
-function getSelectedEntryIndex(selectElement, entries) {
-  const selectedOption = selectElement.selectedOptions[0];
-  const selectedValue = selectedOption?.value ?? '';
-  const valueIndex = Number(selectedValue);
-  if (Number.isInteger(valueIndex) && valueIndex >= 0 && entries[valueIndex]) {
-    return valueIndex;
-  }
-
-  const selectedIndex = selectElement.selectedIndex;
-  if (selectedIndex >= 0 && entries[selectedIndex]) {
-    return selectedIndex;
-  }
-
-  return -1;
-}
-
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, { cache: 'no-store', ...options });
   const data = await response.json().catch(() => ({}));
@@ -529,43 +495,8 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-function featureErrorMessage(error, featureName) {
-  const message = String(error?.message || error || 'Unknown error');
-  if (/\b404\b|not found/i.test(message)) {
-    return `${featureName} is unavailable because the running ASCS Reviewer server is outdated. Restart the server, then reload this page.`;
-  }
-  return `${featureName} failed: ${message}`;
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function formatByteSize(value) {
-  if (value === null || value === undefined || value === '') return '';
-  const bytes = Number(value);
-  if (!Number.isFinite(bytes) || bytes < 0) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let amount = bytes;
-  let unitIndex = -1;
-  do {
-    amount /= 1024;
-    unitIndex += 1;
-  } while (amount >= 1024 && unitIndex < units.length - 1);
-  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${units[unitIndex]}`;
-}
-
-function formatModelDate(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
-}
-
-function formatModelDateTime(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();
 }
 
 function renderModelMetadata(model) {
@@ -842,39 +773,6 @@ async function runModelBenchmark(modelName, button, providerConfig = null) {
   }
 }
 
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  let binary = '';
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
-
-function readFileAsDocument(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const buffer = reader.result;
-      const isTextLike = file.type.startsWith('text/') || /\.(txt|md|rtf|json|csv|tsv|log|ya?ml|xml|html?|toml|ini|cfg|conf|rst|py|c|h|cc|hh|cpp|hpp|cxx|hxx|js|jsx|ts|tsx|java|cs|sql|sh|bat|ps1|m|mm|s|asm|scade|xscade|etp|sgfx|pgfx|ogfx|dgfx|sdfx|rgfx|sss|in|sns|out|obs)$/i.test(file.name);
-      const document = {
-        name: file.name,
-        data_base64: arrayBufferToBase64(buffer),
-        mime_type: file.type || '',
-        path: '',
-      };
-      if (isTextLike) {
-        document.content = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
-      }
-      resolve(document);
-    };
-    reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
-    reader.readAsArrayBuffer(file);
-  });
-}
-
 function renderRagStatus(data) {
   indexedReferenceDocuments = Array.isArray(data?.documents) ? data.documents : [];
   syncRagReferenceEntries(data);
@@ -914,11 +812,6 @@ function syncRagReferenceEntries(data) {
     entry.rag_token_count = Number(document.token_count) || 0;
   });
   renderReferenceEntries();
-}
-
-function createRagDocumentId() {
-  if (globalThis.crypto?.randomUUID) return `browser-${globalThis.crypto.randomUUID()}`;
-  return `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 async function refreshRagStatus() {
@@ -1251,123 +1144,6 @@ function renderTraceLinks(title, links) {
   return `<h3>${escapeHtml(title)}</h3><pre class="trace-copy-block">${escapeHtml(lines.join('\n'))}</pre>`;
 }
 
-function parseStructuredReviewJson(value) {
-  if (typeof value !== 'string') return value;
-  const text = value.trim().replace(/^\uFEFF/, '');
-  const candidates = [text];
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced) candidates.push(fenced[1].trim());
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(text.slice(firstBrace, lastBrace + 1));
-  for (const candidate of candidates) {
-    let parsed = candidate;
-    for (let attempt = 0; attempt < 3 && typeof parsed === 'string'; attempt += 1) {
-      try {
-        parsed = JSON.parse(parsed);
-      } catch (error) {
-        parsed = null;
-        break;
-      }
-    }
-    if (parsed && typeof parsed === 'object') return parsed;
-  }
-  return value;
-}
-
-function formatReviewDisplayValue(value) {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value.trim();
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'number') return String(value);
-  if (Array.isArray(value)) {
-    return value.map((item) => {
-      const formatted = formatReviewDisplayValue(item);
-      if (!formatted) return '';
-      return formatted.includes('\n') ? formatted : `- ${formatted}`;
-    }).filter(Boolean).join('\n\n');
-  }
-  if (typeof value === 'object') {
-    const structuredFinding = formatStructuredFindingForDisplay(value);
-    if (structuredFinding) return structuredFinding;
-    return Object.entries(value).map(([key, item]) => {
-      const label = key.replace(/_/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
-      const formatted = formatReviewDisplayValue(item);
-      return formatted.includes('\n') ? `${label}:\n${formatted}` : `${label}: ${formatted}`;
-    }).filter((line) => !line.endsWith(': ')).join('\n');
-  }
-  return String(value);
-}
-
-function formatStructuredFindingForDisplay(value) {
-  const findingKeys = ['location', 'issue', 'problem', 'violated_rule', 'rule_violated', 'rule', 'evidence', 'comment', 'suggested_resolution', 'target_fix', 'resolution', 'fix'];
-  if (!findingKeys.some((key) => Object.hasOwn(value, key))) return '';
-  const fields = [
-    ['Location', value.location],
-    ['Rule violated', value.violated_rule || value.rule_violated || value.applicable_rule || value.rule],
-    ['Rule evidence', value.rule_evidence || value.rule_reference],
-    ['Issue', value.issue || value.problem || value.title],
-    ['Evidence', value.evidence || value.comment || value.details],
-    ['Target fix', value.suggested_resolution || value.target_fix || value.resolution || value.fix],
-  ];
-  return fields.filter(([, item]) => item !== null && item !== undefined && item !== '')
-    .map(([label, item]) => `${label}: ${formatReviewDisplayValue(item)}`)
-    .join('\n');
-}
-
-function normalizeReviewResultForDisplay(value) {
-  let result = parseStructuredReviewJson(value);
-  if (Array.isArray(result)) {
-    const issueKeys = ['issue', 'problem', 'comment', 'location', 'suggested_resolution', 'target_fix'];
-    const containsComments = result.some((item) => item && typeof item === 'object' && issueKeys.some((key) => Object.hasOwn(item, key)));
-    result = containsComments
-      ? { summary: 'Review completed.', atomic_comments: result }
-      : { summary: 'Review completed.', sections: result };
-  }
-  if (!result || typeof result !== 'object') {
-    const text = formatReviewDisplayValue(result || value || 'No review generated.');
-    return { summary: text, sections: [{ title: 'Review', content: text }], atomic_comments: [] };
-  }
-  for (const key of ['review_result', 'review', 'result', 'output']) {
-    if (result[key] && typeof result[key] === 'object' && !result.summary && !result.sections) {
-      result = result[key];
-      break;
-    }
-  }
-  let sections = result.sections || result.review_sections || [];
-  if (!Array.isArray(sections) && sections && typeof sections === 'object') {
-    sections = Object.entries(sections).map(([title, content]) => ({ title, content }));
-  }
-  if (!Array.isArray(sections)) sections = sections ? [sections] : [];
-  sections = sections.map((section, index) => {
-    if (!section || typeof section !== 'object' || Array.isArray(section)) {
-      return { title: `Review section ${index + 1}`, content: formatReviewDisplayValue(section) };
-    }
-    const content = section.content ?? section.findings ?? section.issues ?? section.assessment ?? section.text ?? '';
-    return {
-      title: formatReviewDisplayValue(section.title || section.name || `Review section ${index + 1}`),
-      content: formatReviewDisplayValue(content),
-    };
-  });
-  let comments = result.atomic_comments || result.atomicComments || result.comments || result.findings || [];
-  if (!Array.isArray(comments) && comments && typeof comments === 'object') comments = Object.values(comments);
-  if (!Array.isArray(comments)) comments = comments ? [comments] : [];
-  comments = comments.filter((comment) => comment && typeof comment === 'object').map((comment, index) => ({
-    id: formatReviewDisplayValue(comment.id || `A${index + 1}`),
-    location: formatReviewDisplayValue(comment.location || ''),
-    violated_rule: formatReviewDisplayValue(comment.violated_rule || comment.rule_violated || comment.rule || ''),
-    rule_evidence: formatReviewDisplayValue(comment.rule_evidence || comment.rule_reference || ''),
-    issue: formatReviewDisplayValue(comment.issue || comment.title || 'Issue'),
-    comment: formatReviewDisplayValue(comment.comment || comment.evidence || comment.details || ''),
-    suggested_resolution: formatReviewDisplayValue(comment.suggested_resolution || comment.target_fix || comment.resolution || ''),
-  }));
-  return {
-    summary: formatReviewDisplayValue(result.summary || result.overall_assessment || result.executive_summary || 'Review completed.'),
-    sections,
-    atomic_comments: comments,
-  };
-}
-
 function buildReviewText(reviewResult) {
   const sections = (reviewResult?.sections || []).map((section) => `## ${section.title}\n${normalizeIndentedIssues(section.content || '')}`).join('\n\n');
   const comments = (reviewResult?.atomic_comments || []).map((comment) => {
@@ -1551,25 +1327,6 @@ async function handleReviewOutputClick(event) {
   } catch (error) {
     reviewStatus.textContent = `Unable to copy comment: ${error.message}`;
   }
-}
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function stripPageFromLocation(value) {
-  return String(value || '')
-    .replace(/\bpage\s+(?:not available in source|\d+(?:\s*\([^)]*\))?)\s*,?\s*/gi, '')
-    .replace(/\|\s*page\s+(?:not available in source|\d+(?:\s*\([^)]*\))?)\s*\|?/gi, '|')
-    .replace(/\s*\|\s*/g, ' | ')
-    .replace(/^\|\s*|\s*\|$/g, '')
-    .replace(/\s+,/g, ',')
-    .replace(/^[\s,-]+|[\s,-]+$/g, '');
 }
 
 function hasReviewResult(reviewResult) {

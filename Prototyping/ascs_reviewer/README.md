@@ -9,6 +9,9 @@ ASCS Reviewer is a local web application for structured review and traceability 
 
 The application itself uses only the Python standard library.
 
+The codebase architecture and the separate minimal-edition branch strategy are
+documented in [`MAINTAINABILITY.md`](MAINTAINABILITY.md).
+
 ## Run on Windows
 
 ```powershell
